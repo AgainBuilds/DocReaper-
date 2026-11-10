@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.env
+.venv/
+library/
+*.db
+*.db-wal
+*.db-shm
+.coverage
+htmlcov/
+dist/
+*.egg-info/
+.ruff_cache/
