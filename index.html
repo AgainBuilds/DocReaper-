@@ -1,0 +1,240 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#0b1020">
+    <meta name="description" content="DocReaper academic book discovery and catalogue dashboard.">
+    <title>DocReaper — Control Center</title>
+    <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+    <div class="app-shell">
+
+        <aside class="sidebar">
+            <a class="brand" href="/">
+                <div class="brand-icon">D</div>
+                <div>
+                    <strong>DOCREAPER</strong>
+                    <span>ACADEMIC ENGINE</span>
+                </div>
+            </a>
+
+            <div class="nav-label">WORKSPACE</div>
+
+            <nav>
+                <a class="nav-link active" href="#overview">
+                    <span>◈</span> Overview
+                </a>
+                <a class="nav-link" href="#library">
+                    <span>▤</span> Library
+                </a>
+                <a class="nav-link" href="#pipeline">
+                    <span>⌁</span> Pipeline
+                </a>
+            </nav>
+
+            <div class="sidebar-bottom">
+                <div class="system-indicator">
+                    <span class="status-dot"></span>
+                    <div>
+                        <strong>Dashboard online</strong>
+                        <small>Read-only monitoring</small>
+                    </div>
+                </div>
+                <small class="version">DOCREAPER v2.0.0</small>
+            </div>
+        </aside>
+
+        <main class="main-content">
+            <header class="topbar">
+                <div>
+                    <div class="eyebrow">SYSTEM / CONTROL CENTER</div>
+                    <h1>Overview</h1>
+                </div>
+                <button id="refresh-button" class="refresh-button">
+                    ↻ Refresh data
+                </button>
+            </header>
+
+            <section class="welcome-panel">
+                <div>
+                    <div class="eyebrow lime">ACADEMIC INTELLIGENCE ENGINE</div>
+                    <h2>Your academic library.<br>Under construction.</h2>
+                    <p>
+                        Monitor book discovery, catalogue growth,
+                        and collection quality from one place.
+                    </p>
+                </div>
+                <div class="welcome-mark">D<span>.</span></div>
+            </section>
+
+            <section class="section-heading" id="overview">
+                <div>
+                    <h2>Collection overview</h2>
+                    <p>Live statistics from your DocReaper database.</p>
+                </div>
+                <span class="live-label">
+                    <span class="status-dot"></span> LIVE DATA
+                </span>
+            </section>
+
+            <section class="stats-grid">
+                <article class="stat-card">
+                    <div class="stat-top">
+                        <span>UNIQUE BOOKS</span>
+                        <span class="stat-symbol">▤</span>
+                    </div>
+                    <strong id="books-count">—</strong>
+                    <small>Successfully catalogued</small>
+                </article>
+
+                <article class="stat-card">
+                    <div class="stat-top">
+                        <span>TARGET</span>
+                        <span class="stat-symbol">◎</span>
+                    </div>
+                    <strong id="target-count">—</strong>
+                    <small>First collection milestone</small>
+                </article>
+
+                <article class="stat-card">
+                    <div class="stat-top">
+                        <span>PENDING</span>
+                        <span class="stat-symbol cyan">◷</span>
+                    </div>
+                    <strong id="pending-count">—</strong>
+                    <small>Awaiting processing</small>
+                </article>
+
+                <article class="stat-card">
+                    <div class="stat-top">
+                        <span>DUPLICATES</span>
+                        <span class="stat-symbol orange">⟳</span>
+                    </div>
+                    <strong id="duplicate-count">—</strong>
+                    <small>Rejected by deduplication</small>
+                </article>
+            </section>
+
+            <section class="content-grid">
+                <article class="panel progress-panel">
+                    <div class="panel-heading">
+                        <div>
+                            <h3>Collection progress</h3>
+                            <p>Progress toward the first milestone.</p>
+                        </div>
+                        <span class="progress-number" id="progress-number">0%</span>
+                    </div>
+
+                    <div class="progress-track">
+                        <div class="progress-fill" id="progress-fill"></div>
+                    </div>
+
+                    <div class="progress-meta">
+                        <span id="progress-books">0 books collected</span>
+                        <span id="progress-target">Target: 270</span>
+                    </div>
+
+                    <div class="mini-stats">
+                        <div>
+                            <span class="mini-dot green"></span>
+                            <strong id="kept-count">0</strong>
+                            <small>Kept</small>
+                        </div>
+                        <div>
+                            <span class="mini-dot red"></span>
+                            <strong id="failed-count">0</strong>
+                            <small>Failed</small>
+                        </div>
+                    </div>
+                </article>
+
+                <article class="panel pipeline-panel" id="pipeline">
+                    <div class="panel-heading">
+                        <div>
+                            <h3>Pipeline architecture</h3>
+                            <p>Core processing stages.</p>
+                        </div>
+                    </div>
+
+                    <div class="pipeline-step">
+                        <span class="pipeline-icon">01</span>
+                        <div>
+                            <strong>Discovery</strong>
+                            <small>Open Library / Gutenberg</small>
+                        </div>
+                        <span class="stage-tag">ENGINE</span>
+                    </div>
+
+                    <div class="pipeline-step">
+                        <span class="pipeline-icon">02</span>
+                        <div>
+                            <strong>Download & extraction</strong>
+                            <small>Document processing</small>
+                        </div>
+                        <span class="stage-tag">ENGINE</span>
+                    </div>
+
+                    <div class="pipeline-step">
+                        <span class="pipeline-icon">03</span>
+                        <div>
+                            <strong>Fingerprint analysis</strong>
+                            <small>SHA-256 / Jaccard similarity</small>
+                        </div>
+                        <span class="stage-tag">ENGINE</span>
+                    </div>
+
+                    <div class="pipeline-step">
+                        <span class="pipeline-icon">04</span>
+                        <div>
+                            <strong>Catalogue & storage</strong>
+                            <small>Unique book retention</small>
+                        </div>
+                        <span class="stage-tag">ENGINE</span>
+                    </div>
+                </article>
+            </section>
+
+            <section class="panel library-panel" id="library">
+                <div class="panel-heading">
+                    <div>
+                        <h3>Recently catalogued books</h3>
+                        <p>The latest records in your collection.</p>
+                    </div>
+                    <span class="stage-tag">CATALOGUE</span>
+                </div>
+
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>TITLE</th>
+                                <th>AUTHOR</th>
+                                <th>SUBJECT</th>
+                                <th>FORMAT</th>
+                                <th>YEAR</th>
+                            </tr>
+                        </thead>
+                        <tbody id="books-table">
+                            <tr>
+                                <td colspan="5" class="empty-state">
+                                    Loading catalogue...
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <footer>
+                <span>DOCREAPER CONTROL CENTER</span>
+                <span id="last-updated">Waiting for data...</span>
+            </footer>
+        </main>
+    </div>
+
+    <script src="/assets/app.js"></script>
+</body>
+</html>
