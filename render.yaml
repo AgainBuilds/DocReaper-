@@ -1,0 +1,9 @@
+
+services:
+  - type: web
+    name: docreaper-dashboard
+    runtime: python
+    plan: free
+    buildCommand: pip install -e . && pip install -r requirements-web.txt
+    startCommand: uvicorn web:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
