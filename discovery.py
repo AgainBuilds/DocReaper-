@@ -1,9 +1,13 @@
-"""Internet discovery of open-access undergraduate textbooks."""
+
+"""Internet discovery through Gutendex and Open Library."""
 from __future__ import annotations
 
+import logging
 import httpx
 
 from .schemas import DiscoveryRecord
+
+log = logging.getLogger("docreaper")
 
 GUTENDEX_URL = "https://gutendex.com/books"
 OPENLIBRARY_URL = "https://openlibrary.org/search.json"
@@ -17,85 +21,189 @@ GUTENDEX_FORMATS = (
 )
 
 
-def _gutendex_download(formats: dict) -> str | None:
+def _gutendex_download(formats):
     for mime in GUTENDEX_FORMATS:
         if mime in formats:
             return formats[mime]
     return None
 
 
-async def discover_gutendex(
-    client: httpx.AsyncClient, subject: str, pages: int = 2
-) -> list[DiscoveryRecord]:
-    records: list[DiscoveryRecord] = []
+async def discover_gutendex(client, subject, pages=2):
+    records = []
+
     for page in range(1, pages + 1):
+        params = {"topic": subject, "page": page}
+
+        log.info(
+            "GUTENDEX SEARCH | subject=%s | page=%d",
+            subject, page
+        )
+
         try:
-            resp = await client.get(
-                GUTENDEX_URL, params={"topic": subject, "page": page}
+            response = await client.get(
+                GUTENDEX_URL,
+                params=params
             )
-            resp.raise_for_status()
-            data = resp.json()
-        except (httpx.HTTPError, ValueError):
+            response.raise_for_status()
+            data = response.json()
+
+            log.info(
+                "GUTENDEX RESPONSE | HTTP %d | %d results",
+                response.status_code,
+                len(data.get("results", []))
+            )
+
+        except (httpx.HTTPError, ValueError) as exc:
+            log.exception("GUTENDEX ERROR | %s", exc)
             break
+
+        page_count = 0
+
         for item in data.get("results", []):
-            url = _gutendex_download(item.get("formats", {}))
+            url = _gutendex_download(
+                item.get("formats", {})
+            )
+
             if not url:
                 continue
+
             summaries = item.get("summaries") or [""]
-            records.append(DiscoveryRecord(
+
+            record = DiscoveryRecord(
                 url=url,
                 title=item.get("title", "Untitled"),
-                authors=", ".join(a.get("name", "") for a in item.get("authors", [])),
+                authors=", ".join(
+                    author.get("name", "")
+                    for author in item.get("authors", [])
+                ),
                 source="gutenberg",
                 subject=subject,
                 category="reference",
                 description=summaries[0][:500],
-            ))
+            )
+
+            records.append(record)
+            page_count += 1
+
+            log.info(
+                "BOOK DISCOVERED | %s | %s",
+                record.title,
+                record.authors
+            )
+
+        log.info(
+            "GUTENDEX PAGE COMPLETE | %d downloadable candidates",
+            page_count
+        )
+
         if not data.get("next"):
             break
+
     return records
 
 
-async def discover_openlibrary(
-    client: httpx.AsyncClient, subject: str, pages: int = 2
-) -> list[DiscoveryRecord]:
-    records: list[DiscoveryRecord] = []
+async def discover_openlibrary(client, subject, pages=2):
+    records = []
+
     for page in range(1, pages + 1):
+        params = {
+            "q": f"{subject} textbook",
+            "fields": "title,author_name,first_publish_year,ia",
+            "limit": 100,
+            "page": page,
+        }
+
+        log.info(
+            "OPEN LIBRARY SEARCH | subject=%s | page=%d",
+            subject, page
+        )
+
         try:
-            resp = await client.get(OPENLIBRARY_URL, params={
-                "q": f"{subject} textbook",
-                "fields": "title,author_name,first_publish_year,ia",
-                "limit": 100,
-                "page": page,
-            })
-            resp.raise_for_status()
-            docs = resp.json().get("docs", [])
-        except (httpx.HTTPError, ValueError):
+            response = await client.get(
+                OPENLIBRARY_URL,
+                params=params
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            docs = data.get("docs", [])
+
+            log.info(
+                "OPEN LIBRARY RESPONSE | HTTP %d | %d records",
+                response.status_code,
+                len(docs)
+            )
+
+        except (httpx.HTTPError, ValueError) as exc:
+            log.exception("OPEN LIBRARY ERROR | %s", exc)
             break
+
         for doc in docs:
-            ocaids = doc.get("ia") or []
-            if not ocaids:
+            identifiers = doc.get("ia") or []
+
+            if not identifiers:
                 continue
-            ocaid = ocaids[0]
-            records.append(DiscoveryRecord(
-                url=f"https://archive.org/download/{ocaid}/{ocaid}.pdf",
+
+            identifier = identifiers[0]
+
+            record = DiscoveryRecord(
+                url=(
+                    f"https://archive.org/download/"
+                    f"{identifier}/{identifier}.pdf"
+                ),
                 title=doc.get("title", "Untitled"),
-                authors=", ".join(doc.get("author_name", [])[:3]),
+                authors=", ".join(
+                    doc.get("author_name", [])[:3]
+                ),
                 source="openlibrary",
                 subject=subject,
                 category="core",
                 year=doc.get("first_publish_year"),
-            ))
+            )
+
+            records.append(record)
+
+            log.info(
+                "CATALOGUE RECORD FOUND | %s | %s",
+                record.title,
+                record.authors
+            )
+
         if len(docs) < 100:
             break
+
     return records
 
 
-async def discover_all(
-    client: httpx.AsyncClient, subjects: list[str], pages_per_subject: int = 2
-) -> list[DiscoveryRecord]:
-    records: list[DiscoveryRecord] = []
-    for subject in subjects:
-        records += await discover_openlibrary(client, subject, pages_per_subject)
-        records += await discover_gutendex(client, subject, pages_per_subject)
+async def discover_all(client, subjects, pages_per_subject=2):
+    records = []
+
+    log.info(
+        "DISCOVERY ENGINE STARTED | %d subjects",
+        len(subjects)
+    )
+
+    for index, subject in enumerate(subjects, start=1):
+        log.info(
+            "SUBJECT SCAN | %d/%d | %s",
+            index, len(subjects), subject
+        )
+
+        records.extend(
+            await discover_openlibrary(
+                client, subject, pages_per_subject
+            )
+        )
+
+        records.extend(
+            await discover_gutendex(
+                client, subject, pages_per_subject
+            )
+        )
+
+    log.info(
+        "DISCOVERY FINISHED | %d total candidate records",
+        len(records)
+    )
+
     return records
