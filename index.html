@@ -1,93 +1,389 @@
 
-<section class="panel control-panel" id="engine-control">
-    <div class="panel-heading">
-        <div>
-            <h3>Collection engine control</h3>
-            <p>Manage the live research and ingestion process.</p>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#f4f6fb">
+    <meta name="description" content="DocReaper Academic Engine — open-access academic book discovery, deduplication and cloud storage.">
+    <title>DocReaper | Academic Engine</title>
+    <link rel="stylesheet" href="/assets/styles.css">
+    <script src="/assets/app.js" defer></script>
+</head>
+
+<body>
+<div class="app">
+
+    <header class="topbar">
+        <div class="brand">
+            <div class="brand-icon">D</div>
+            <div>
+                <h1>DOCREAPER</h1>
+                <p>ACADEMIC ENGINE</p>
+            </div>
         </div>
-        <span id="engine-status" class="engine-status">IDLE</span>
-    </div>
 
-    <div class="control-token">
-        <label for="control-token">ENGINE CONTROL KEY</label>
-        <input
-            id="control-token"
-            type="password"
-            placeholder="Enter your Render control token"
-            autocomplete="off"
-        >
-        <button id="save-token" type="button">Unlock controls</button>
-    </div>
+        <nav class="navigation">
+            <a href="#overview" class="active">Overview</a>
+            <a href="#pipeline">Pipeline</a>
+            <a href="#catalogue">Catalogue</a>
+            <a href="#engine-control">Engine</a>
+        </nav>
+    </header>
 
-    <div class="engine-buttons">
-        <button id="start-engine" class="engine-start">
-            ▶ START COLLECTION
-        </button>
-        <button id="pause-engine" disabled>
-            Ⅱ PAUSE
-        </button>
-        <button id="resume-engine" disabled>
-            ▶ RESUME
-        </button>
-        <button id="stop-engine" class="engine-stop" disabled>
-            ■ STOP
-        </button>
-    </div>
+    <main class="main-content">
 
-    <div class="engine-metrics">
-        <div>
-            <small>CATALOGUED</small>
-            <strong id="engine-books">0</strong>
-        </div>
-        <div>
-            <small>PENDING</small>
-            <strong id="engine-pending">0</strong>
-        </div>
-        <div>
-            <small>TARGET</small>
-            <strong id="engine-target">270</strong>
-        </div>
-    </div>
-</section>
+        <!-- PAGE HEADER -->
+        <section class="page-header" id="overview">
+            <div>
+                <h1>Academic Engine Dashboard</h1>
+                <p>
+                    Monitor discovery, processing, duplicate detection
+                    and academic book collection.
+                </p>
+            </div>
 
-<section class="panel terminal-panel">
-    <div class="terminal-heading">
-        <div>
-            <h3>Live engine terminal</h3>
-            <p>Real-time discovery, network and processing events.</p>
-        </div>
-        <span id="terminal-connection">CONNECTING...</span>
-    </div>
+            <button id="refresh-button" class="primary" type="button">
+                ↻ Refresh data
+            </button>
+        </section>
 
-    <div class="terminal-toolbar">
-        <select id="log-filter">
-            <option value="ALL">All events</option>
-            <option value="INFO">Information</option>
-            <option value="WARNING">Warnings</option>
-            <option value="ERROR">Errors</option>
-        </select>
+        <!-- OVERVIEW METRICS -->
+        <section class="overview-grid">
 
-        <label class="terminal-auto">
-            <input id="auto-scroll" type="checkbox" checked>
-            Auto-scroll
-        </label>
+            <article class="metric-card">
+                <div class="stat-icon">📚</div>
+                <div class="metric-label">CATALOGUED BOOKS</div>
+                <div class="metric-value" id="books-count">0</div>
+                <div class="stat-change">Unique books stored</div>
+            </article>
 
-        <button id="clear-terminal" type="button">
-            Clear display
-        </button>
-    </div>
+            <article class="metric-card">
+                <div class="stat-icon">🎯</div>
+                <div class="metric-label">COLLECTION TARGET</div>
+                <div class="metric-value" id="target-count">270</div>
+                <div class="stat-change">Current milestone</div>
+            </article>
 
-    <div id="terminal-output" class="terminal-output">
-        <div class="terminal-line info">
-            DOCREAPER TERMINAL INITIALIZED
-        </div>
-        <div class="terminal-line info">
-            Waiting for engine events...
-        </div>
-    </div>
+            <article class="metric-card">
+                <div class="stat-icon">⏳</div>
+                <div class="metric-label">PENDING DISCOVERIES</div>
+                <div class="metric-value" id="pending-count">0</div>
+                <div class="stat-change">Awaiting processing</div>
+            </article>
 
-    <div class="terminal-footer">
-        <span>DOCREAPER ENGINE / TELEMETRY</span>
-        <span id="terminal-log-count">0 EVENTS</span>
-    </div>
-</section>
+            <article class="metric-card">
+                <div class="stat-icon">♻️</div>
+                <div class="metric-label">DUPLICATES REJECTED</div>
+                <div class="metric-value" id="duplicate-count">0</div>
+                <div class="stat-change">Duplicate content detected</div>
+            </article>
+
+        </section>
+
+        <!-- COLLECTION PROGRESS -->
+        <section class="card progress-section">
+            <div class="progress-header">
+                <h2>Collection progress</h2>
+                <span class="progress-number" id="progress-number">0%</span>
+            </div>
+
+            <div class="progress-track">
+                <div
+                    class="progress-fill"
+                    id="progress-fill"
+                    style="width: 0%"
+                ></div>
+            </div>
+
+            <div class="progress-details">
+                <span id="progress-books">0 books collected</span>
+                <span id="progress-target">Target: 270</span>
+            </div>
+        </section>
+
+        <!-- PROCESSING PIPELINE -->
+        <section id="pipeline" class="card progress-section">
+            <h2>Processing pipeline</h2>
+            <p class="card-description">
+                The stages used to discover and preserve unique academic books.
+            </p>
+
+            <div class="pipeline-grid">
+
+                <article class="pipeline-stage">
+                    <div class="stage-number">01</div>
+                    <h3>Discovery</h3>
+                    <p>
+                        Find eligible academic books from open-access
+                        and public-domain sources.
+                    </p>
+                </article>
+
+                <article class="pipeline-stage">
+                    <div class="stage-number">02</div>
+                    <h3>Download & extraction</h3>
+                    <p>
+                        Retrieve supported files and extract
+                        their readable text.
+                    </p>
+                </article>
+
+                <article class="pipeline-stage">
+                    <div class="stage-number">03</div>
+                    <h3>Mathematical validation</h3>
+                    <p>
+                        Apply SHA-256, normalized-text hashing
+                        and Jaccard similarity.
+                    </p>
+                </article>
+
+                <article class="pipeline-stage">
+                    <div class="stage-number">04</div>
+                    <h3>Cloud preservation</h3>
+                    <p>
+                        Store accepted unique books and register
+                        their catalogue metadata.
+                    </p>
+                </article>
+
+            </div>
+
+            <div class="engine-metrics">
+                <div class="engine-metric">
+                    <span>ACCEPTED</span>
+                    <strong id="kept-count">0</strong>
+                </div>
+
+                <div class="engine-metric">
+                    <span>FAILED</span>
+                    <strong id="failed-count">0</strong>
+                </div>
+            </div>
+        </section>
+
+        <!-- BOOK CATALOGUE -->
+        <section id="catalogue" class="card progress-section">
+            <div class="progress-header">
+                <div>
+                    <h2>Academic book catalogue</h2>
+                    <p class="card-description">
+                        Recently accepted unique books.
+                    </p>
+                </div>
+
+                <span id="last-updated" class="stat-change">
+                    Waiting for data...
+                </span>
+            </div>
+
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Book title</th>
+                            <th>Author</th>
+                            <th>Subject</th>
+                            <th>Format</th>
+                            <th>Year</th>
+                        </tr>
+                    </thead>
+
+                    <tbody id="books-table">
+                        <tr>
+                            <td colspan="5" class="empty-state">
+                                Loading academic catalogue...
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- ENGINE CONTROL -->
+        <section class="panel engine-panel" id="engine-control">
+
+            <div class="engine-header">
+                <div>
+                    <h2>Collection engine control</h2>
+                    <p>
+                        Manage the research and ingestion process.
+                    </p>
+                </div>
+
+                <span id="engine-status" class="engine-status">
+                    IDLE
+                </span>
+            </div>
+
+            <div class="engine-auth">
+                <div class="input-group">
+                    <label for="control-token">
+                        ENGINE CONTROL KEY
+                    </label>
+
+                    <input
+                        id="control-token"
+                        type="password"
+                        placeholder="Enter your Render control token"
+                        autocomplete="off"
+                    >
+                </div>
+
+                <button
+                    id="save-token"
+                    class="secondary"
+                    type="button"
+                >
+                    Unlock controls
+                </button>
+            </div>
+
+            <div class="engine-actions">
+
+                <button
+                    id="start-engine"
+                    class="primary engine-start"
+                    type="button"
+                >
+                    ▶ START COLLECTION
+                </button>
+
+                <button
+                    id="pause-engine"
+                    class="secondary"
+                    type="button"
+                    disabled
+                >
+                    Ⅱ PAUSE
+                </button>
+
+                <button
+                    id="resume-engine"
+                    class="secondary"
+                    type="button"
+                    disabled
+                >
+                    ▶ RESUME
+                </button>
+
+                <button
+                    id="stop-engine"
+                    class="danger engine-stop"
+                    type="button"
+                    disabled
+                >
+                    ■ STOP
+                </button>
+
+            </div>
+
+            <div class="engine-metrics">
+
+                <div class="engine-metric">
+                    <span>CATALOGUED</span>
+                    <strong id="engine-books">0</strong>
+                </div>
+
+                <div class="engine-metric">
+                    <span>PENDING</span>
+                    <strong id="engine-pending">0</strong>
+                </div>
+
+                <div class="engine-metric">
+                    <span>TARGET</span>
+                    <strong id="engine-target">270</strong>
+                </div>
+
+            </div>
+
+            <p class="card-description">
+                Collection currently runs through the GitHub Actions
+                workflow. The Start button will remain unavailable
+                until dashboard-to-GitHub workflow authentication
+                is implemented.
+            </p>
+
+        </section>
+
+        <!-- LIVE TERMINAL -->
+        <section class="terminal-section">
+
+            <div class="terminal-header">
+                <div class="terminal-title">
+                    <div class="terminal-dots">
+                        <span></span>
+                        <span></span>
+                        <span></span>
+                    </div>
+
+                    DOCREAPER LIVE ENGINE TERMINAL
+                </div>
+
+                <span
+                    id="terminal-connection"
+                    class="terminal-connection"
+                >
+                    CONNECTING...
+                </span>
+            </div>
+
+            <div class="terminal-tools">
+
+                <select id="log-filter">
+                    <option value="ALL">All events</option>
+                    <option value="INFO">Information</option>
+                    <option value="WARNING">Warnings</option>
+                    <option value="ERROR">Errors</option>
+                </select>
+
+                <label class="terminal-autoscroll">
+                    <input
+                        id="auto-scroll"
+                        type="checkbox"
+                        checked
+                    >
+                    Auto-scroll
+                </label>
+
+                <button
+                    id="clear-terminal"
+                    type="button"
+                >
+                    Clear display
+                </button>
+
+            </div>
+
+            <div
+                id="terminal-output"
+                class="terminal-body terminal-output"
+                aria-live="polite"
+            >
+                <div class="terminal-line info">
+                    DOCREAPER TERMINAL INITIALIZED
+                </div>
+
+                <div class="terminal-line info">
+                    Waiting for engine events...
+                </div>
+            </div>
+
+            <div class="terminal-footer">
+                <span>DOCREAPER ENGINE / TELEMETRY</span>
+                <span id="terminal-log-count">0 EVENTS</span>
+            </div>
+
+        </section>
+
+        <footer style="padding: 28px 0; text-align: center;">
+            <p class="card-description">
+                DOCREAPER ACADEMIC ENGINE · Open-access research
+                collection and preservation.
+            </p>
+        </footer>
+
+    </main>
+</div>
+</body>
+</html>
