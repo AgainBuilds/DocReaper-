@@ -1,8 +1,9 @@
 
-"""DocReaper dashboard and live pipeline control."""
+"""DocReaper dashboard, pipeline control and Google OAuth."""
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import secrets
 from collections import deque
@@ -10,19 +11,26 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, Header, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from docreaper.config import settings
+from docreaper.google_drive import (
+    authorization_url,
+    create_state,
+    exchange_code,
+    verify_state,
+)
 from docreaper.pipeline import Pipeline
 from docreaper.storage import Store
+
 
 BASE_DIR = Path(__file__).resolve().parent
 
 app = FastAPI(
     title="DocReaper Control Center",
-    version="2.1.0",
+    version="2.2.0",
 )
 
 app.mount(
@@ -48,6 +56,10 @@ control = {
 }
 
 
+# ---------------------------------------------------------
+# LOGGING
+# ---------------------------------------------------------
+
 class LiveLogHandler(logging.Handler):
     def emit(self, record):
         global log_id
@@ -59,10 +71,8 @@ class LiveLogHandler(logging.Handler):
                 "id": log_id,
                 "time": datetime.fromtimestamp(
                     record.created,
-                    timezone.utc
-                ).astimezone().isoformat(
-                    timespec="seconds"
-                ),
+                    timezone.utc,
+                ).astimezone().isoformat(timespec="seconds"),
                 "level": record.levelname,
                 "message": self.format(record),
             })
@@ -78,26 +88,28 @@ if not any(
     isinstance(handler, LiveLogHandler)
     for handler in engine_logger.handlers
 ):
-    handler = LiveLogHandler()
-    handler.setFormatter(
-        logging.Formatter("%(message)s")
-    )
-    engine_logger.addHandler(handler)
+    live_handler = LiveLogHandler()
+    live_handler.setFormatter(logging.Formatter("%(message)s"))
+    engine_logger.addHandler(live_handler)
 
 
-def require_token(token):
+# ---------------------------------------------------------
+# HELPERS
+# ---------------------------------------------------------
+
+def require_token(token: str):
     configured = settings.control_token.strip()
 
     if not configured:
         raise HTTPException(
             status_code=503,
-            detail="Set DOCREAPER_CONTROL_TOKEN in Render first."
+            detail="Set DOCREAPER_CONTROL_TOKEN in Render first.",
         )
 
     if not secrets.compare_digest(token, configured):
         raise HTTPException(
             status_code=401,
-            detail="Invalid control token."
+            detail="Invalid control token.",
         )
 
 
@@ -110,60 +122,18 @@ def get_stats():
         store.close()
 
 
-async def collection_worker():
-    store = None
-    client = None
+def oauth_configuration_ready():
+    return all([
+        settings.google_client_id,
+        settings.google_client_secret,
+        settings.google_redirect_uri,
+        settings.google_oauth_state_secret,
+    ])
 
-    try:
-        engine_logger.info("WORKER | Initializing collection engine")
 
-        store = Store(settings.database_url)
-
-        client = httpx.AsyncClient(
-            follow_redirects=True,
-            headers={"User-Agent": settings.user_agent},
-        )
-
-        pipeline = Pipeline(
-            store,
-            client=client,
-            pause_event=pause_event,
-            stop_event=stop_event,
-        )
-
-        engine_logger.info(
-            "TARGET | %d unique books",
-            settings.target_unique_books
-        )
-
-        summary = await pipeline.run()
-
-        control["summary"] = summary
-
-        if stop_event.is_set():
-            control["status"] = "stopped"
-            engine_logger.warning("WORKER | Safely stopped")
-        else:
-            control["status"] = "completed"
-            engine_logger.info("WORKER | Collection completed")
-
-        engine_logger.info("SUMMARY | %s", summary)
-
-    except Exception:
-        control["status"] = "failed"
-        engine_logger.exception("WORKER | Fatal failure")
-
-    finally:
-        if client:
-            await client.aclose()
-
-        if store:
-            store.close()
-
-        control["finished_at"] = (
-            datetime.now(timezone.utc).isoformat()
-        )
-
+# ---------------------------------------------------------
+# DASHBOARD
+# ---------------------------------------------------------
 
 @app.get("/", include_in_schema=False)
 def dashboard():
@@ -174,13 +144,176 @@ def dashboard():
 def health():
     return {
         "status": "ok",
-        "service": "docreaper-dashboard"
+        "service": "docreaper-dashboard",
     }
 
+
+# ---------------------------------------------------------
+# GOOGLE DRIVE OAUTH
+# ---------------------------------------------------------
+
+@app.get("/auth/google", include_in_schema=False)
+async def google_auth(response: Response):
+    if not oauth_configuration_ready():
+        raise HTTPException(
+            status_code=503,
+            detail="Google OAuth environment variables are incomplete.",
+        )
+
+    state = create_state(settings.google_oauth_state_secret)
+
+    redirect = RedirectResponse(
+        authorization_url(
+            settings.google_client_id,
+            settings.google_redirect_uri,
+            state,
+        ),
+        status_code=302,
+    )
+
+    redirect.set_cookie(
+        key="docreaper_oauth_state",
+        value=state,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        max_age=600,
+    )
+
+    return redirect
+
+
+@app.get("/auth/google/callback", include_in_schema=False)
+async def google_callback(
+    request: Request,
+    code: str = "",
+    state: str = "",
+    error: str = "",
+):
+    if error:
+        raise HTTPException(
+            status_code=400,
+            detail="Google authorization was not completed.",
+        )
+
+    if not code or not state:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing authorization code or state.",
+        )
+
+    if not oauth_configuration_ready():
+        raise HTTPException(
+            status_code=503,
+            detail="Google OAuth configuration is incomplete.",
+        )
+
+    cookie_state = request.cookies.get("docreaper_oauth_state")
+
+    if not cookie_state or not secrets.compare_digest(
+        cookie_state,
+        state,
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="OAuth browser session mismatch. Start again.",
+        )
+
+    if not verify_state(
+        state,
+        settings.google_oauth_state_secret,
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="OAuth state is invalid or expired.",
+        )
+
+    try:
+        tokens = await exchange_code(
+            code=code,
+            client_id=settings.google_client_id,
+            client_secret=settings.google_client_secret,
+            redirect_uri=settings.google_redirect_uri,
+        )
+
+    except httpx.HTTPStatusError:
+        engine_logger.exception(
+            "GOOGLE OAUTH | Token exchange failed"
+        )
+
+        raise HTTPException(
+            status_code=502,
+            detail="Google token exchange failed.",
+        )
+
+    refresh_token = tokens.get("refresh_token")
+
+    if not refresh_token:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Google did not return a refresh token. "
+                "Revoke the previous DocReaper authorization "
+                "from your Google Account and authorize again."
+            ),
+        )
+
+    safe_token = html.escape(refresh_token)
+
+    page = f"""
+    <!doctype html>
+    <html>
+    <head>
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <title>DocReaper Drive Connected</title>
+      <style>
+        body {{
+          font-family: Arial, sans-serif;
+          max-width: 760px;
+          margin: 40px auto;
+          padding: 20px;
+          line-height: 1.6;
+        }}
+        textarea {{
+          width: 100%;
+          min-height: 110px;
+          box-sizing: border-box;
+        }}
+        button {{
+          padding: 12px 18px;
+          margin-top: 12px;
+        }}
+      </style>
+    </head>
+    <body>
+      <h2>Google authorization successful</h2>
+      <p>
+        Copy this refresh token into your Render environment variable:
+        <strong>DOCREAPER_GOOGLE_DRIVE_REFRESH_TOKEN</strong>
+      </p>
+      <textarea id="token" readonly>{safe_token}</textarea>
+      <button onclick="navigator.clipboard.writeText(
+        document.getElementById('token').value
+      )">Copy refresh token</button>
+      <p>Keep this token private. Never commit it to GitHub.</p>
+      <p>After adding it to Render, redeploy DocReaper.</p>
+    </body>
+    </html>
+    """
+
+    response = HTMLResponse(page)
+    response.delete_cookie("docreaper_oauth_state")
+    return response
+
+
+# ---------------------------------------------------------
+# STATISTICS AND CATALOGUE
+# ---------------------------------------------------------
 
 @app.get("/api/overview")
 def overview():
     stats = get_stats()
+
     target = settings.target_unique_books
     total = stats["books"]
 
@@ -209,6 +342,10 @@ def books(limit: int = Query(default=10, ge=1, le=50)):
         store.close()
 
 
+# ---------------------------------------------------------
+# PIPELINE STATUS
+# ---------------------------------------------------------
+
 @app.get("/api/control/status")
 def control_status():
     stats = get_stats()
@@ -220,6 +357,10 @@ def control_status():
         "target": settings.target_unique_books,
     }
 
+
+# ---------------------------------------------------------
+# LIVE LOGS
+# ---------------------------------------------------------
 
 @app.get("/api/logs")
 def get_logs(
@@ -237,9 +378,74 @@ def get_logs(
     }
 
 
+# ---------------------------------------------------------
+# COLLECTION WORKER
+# ---------------------------------------------------------
+
+async def collection_worker():
+    store = None
+    client = None
+
+    try:
+        engine_logger.info(
+            "WORKER | Initializing collection engine"
+        )
+
+        store = Store(settings.database_url)
+
+        client = httpx.AsyncClient(
+            follow_redirects=True,
+            headers={"User-Agent": settings.user_agent},
+        )
+
+        pipeline = Pipeline(
+            store,
+            client=client,
+            pause_event=pause_event,
+            stop_event=stop_event,
+        )
+
+        engine_logger.info(
+            "TARGET | %d unique books",
+            settings.target_unique_books,
+        )
+
+        summary = await pipeline.run()
+
+        control["summary"] = summary
+
+        if stop_event.is_set():
+            control["status"] = "stopped"
+            engine_logger.warning("WORKER | Safely stopped")
+        else:
+            control["status"] = "completed"
+            engine_logger.info("WORKER | Collection completed")
+
+        engine_logger.info("SUMMARY | %s", summary)
+
+    except Exception:
+        control["status"] = "failed"
+        engine_logger.exception("WORKER | Fatal failure")
+
+    finally:
+        if client:
+            await client.aclose()
+
+        if store:
+            store.close()
+
+        control["finished_at"] = datetime.now(
+            timezone.utc
+        ).isoformat()
+
+
+# ---------------------------------------------------------
+# START
+# ---------------------------------------------------------
+
 @app.post("/api/control/start")
 async def start_collection(
-    x_control_token: str = Header(default="")
+    x_control_token: str = Header(default=""),
 ):
     global worker
 
@@ -248,7 +454,7 @@ async def start_collection(
     if worker and not worker.done():
         raise HTTPException(
             status_code=409,
-            detail="Collection already active."
+            detail="Collection is already active.",
         )
 
     pause_event.set()
@@ -265,23 +471,25 @@ async def start_collection(
 
     engine_logger.info("CONTROL | START command received")
 
-    worker = asyncio.create_task(
-        collection_worker()
-    )
+    worker = asyncio.create_task(collection_worker())
 
     return {"status": "running"}
 
 
+# ---------------------------------------------------------
+# PAUSE
+# ---------------------------------------------------------
+
 @app.post("/api/control/pause")
 async def pause_collection(
-    x_control_token: str = Header(default="")
+    x_control_token: str = Header(default=""),
 ):
     require_token(x_control_token)
 
     if control["status"] != "running":
         raise HTTPException(
             status_code=409,
-            detail="Engine is not running."
+            detail="Engine is not running.",
         )
 
     pause_event.clear()
@@ -292,16 +500,20 @@ async def pause_collection(
     return {"status": "paused"}
 
 
+# ---------------------------------------------------------
+# RESUME
+# ---------------------------------------------------------
+
 @app.post("/api/control/resume")
 async def resume_collection(
-    x_control_token: str = Header(default="")
+    x_control_token: str = Header(default=""),
 ):
     require_token(x_control_token)
 
     if control["status"] != "paused":
         raise HTTPException(
             status_code=409,
-            detail="Engine is not paused."
+            detail="Engine is not paused.",
         )
 
     pause_event.set()
@@ -312,16 +524,20 @@ async def resume_collection(
     return {"status": "running"}
 
 
+# ---------------------------------------------------------
+# STOP
+# ---------------------------------------------------------
+
 @app.post("/api/control/stop")
 async def stop_collection(
-    x_control_token: str = Header(default="")
+    x_control_token: str = Header(default=""),
 ):
     require_token(x_control_token)
 
     if control["status"] not in ("running", "paused"):
         raise HTTPException(
             status_code=409,
-            detail="No active collection."
+            detail="No active collection.",
         )
 
     stop_event.set()
