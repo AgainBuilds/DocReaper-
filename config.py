@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
+        env_prefix="DOCREAPER_",
         extra="ignore",
         case_sensitive=False,
     )
@@ -16,7 +17,7 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "sqlite:///./docreaper.db"
 
-    # Existing cloud storage
+    # Cloud storage
     gcs_bucket: str = ""
     gcs_prefix: str = "books"
     local_library_dir: str = "library"
@@ -27,10 +28,15 @@ class Settings(BaseSettings):
     download_delay_seconds: float = 1.0
     download_retries: int = 3
     request_timeout: int = 60
-    user_agent: str = "DocReaper/1.0 (open-access academic research)"
+    user_agent: str = (
+        "DocReaper/1.0 (open-access academic research)"
+    )
 
+    # Deduplication
     near_duplicate_threshold: float = 0.85
     min_text_chars: int = 1000
+
+    # Discovery
     pages_per_subject: int = 3
     subjects: list[str] = [
         "computer science",
