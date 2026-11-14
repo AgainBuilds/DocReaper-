@@ -13,7 +13,6 @@ const API = {
 const $ = id => document.getElementById(id);
 
 let lastLogId = 0;
-let totalLogCount = 0;
 let displayedLogs = [];
 let terminalClearedAt = 0;
 let controlToken = sessionStorage.getItem("docreaper_token") || "";
@@ -32,7 +31,6 @@ const elements = {
     table: $("books-table"),
     updated: $("last-updated"),
     refresh: $("refresh-button"),
-
     token: $("control-token"),
     saveToken: $("save-token"),
     status: $("engine-status"),
@@ -40,11 +38,9 @@ const elements = {
     pause: $("pause-engine"),
     resume: $("resume-engine"),
     stop: $("stop-engine"),
-
     engineBooks: $("engine-books"),
     enginePending: $("engine-pending"),
     engineTarget: $("engine-target"),
-
     terminal: $("terminal-output"),
     connection: $("terminal-connection"),
     filter: $("log-filter"),
@@ -67,13 +63,25 @@ function safeText(value) {
     })[char]);
 }
 
+function formatLogTime(value) {
+    if (!value) return "TIME UNKNOWN";
+
+    const date = new Date(value);
+
+    if (Number.isNaN(date.getTime())) {
+        return "TIME UNKNOWN";
+    }
+
+    return date.toLocaleTimeString();
+}
+
 async function apiRequest(url, options = {}) {
     const response = await fetch(url, {
         ...options,
         headers: {
             ...(options.headers || {}),
             ...(controlToken
-                ? {"X-Control-Token": controlToken}
+                ? { "X-Control-Token": controlToken }
                 : {})
         }
     });
@@ -81,11 +89,15 @@ async function apiRequest(url, options = {}) {
     const data = await response.json().catch(() => ({}));
 
     if (!response.ok) {
-        throw new Error(data.detail || "Request failed.");
+        throw new Error(
+            data.detail || `Request failed (${response.status}).`
+        );
     }
 
     return data;
 }
+
+// OVERVIEW
 
 async function loadOverview() {
     const response = await fetch(API.overview);
@@ -116,6 +128,8 @@ async function loadOverview() {
     elements.kept.textContent = formatNumber(data.kept);
     elements.failed.textContent = formatNumber(data.failed);
 }
+
+// BOOK CATALOGUE
 
 async function loadBooks() {
     const response = await fetch(API.books);
@@ -164,6 +178,8 @@ async function refreshDashboard() {
     }
 }
 
+// ENGINE STATUS
+
 function setEngineStatus(status) {
     const normalized = String(status || "idle").toLowerCase();
 
@@ -199,8 +215,29 @@ async function refreshEngineStatus() {
 
     } catch (error) {
         elements.connection.textContent = "CONNECTION ERROR";
-        console.error(error);
+        console.error("Engine status:", error);
     }
+}
+
+// TERMINAL
+
+function renderLog(entry) {
+    const line = document.createElement("div");
+    const level = String(entry.level || "INFO").toLowerCase();
+
+    line.className = `terminal-line ${level}`;
+
+    line.textContent =
+        `[${formatLogTime(entry.created_at)}] ` +
+        `[${String(entry.level || "INFO")}] ` +
+        `${String(entry.message || "")}`;
+
+    elements.terminal.appendChild(line);
+}
+
+function updateLogCount() {
+    elements.logCount.textContent =
+        `${displayedLogs.length} EVENTS`;
 }
 
 function addLog(entry) {
@@ -210,29 +247,20 @@ function addLog(entry) {
 
     if (
         filter !== "ALL" &&
-        entry.level !== filter
+        String(entry.level).toUpperCase() !== filter
     ) {
+        updateLogCount();
         return;
     }
 
-    const line = document.createElement("div");
-
-    line.className =
-        `terminal-line ${entry.level.toLowerCase()}`;
-
-    line.textContent =
-        `[${new Date(entry.time).toLocaleTimeString()}] ` +
-        `[${entry.level}] ${entry.message}`;
-
-    elements.terminal.appendChild(line);
+    renderLog(entry);
 
     if (elements.autoScroll.checked) {
         elements.terminal.scrollTop =
             elements.terminal.scrollHeight;
     }
 
-    elements.logCount.textContent =
-        `${displayedLogs.length} EVENTS`;
+    updateLogCount();
 }
 
 async function fetchLogs() {
@@ -242,15 +270,18 @@ async function fetchLogs() {
         );
 
         if (!response.ok) {
-            throw new Error("Log feed unavailable");
+            throw new Error("Log feed unavailable.");
         }
 
         const data = await response.json();
 
         for (const entry of data.logs || []) {
-            lastLogId = Math.max(lastLogId, entry.id);
+            lastLogId = Math.max(
+                lastLogId,
+                Number(entry.id) || 0
+            );
 
-            if (entry.id > terminalClearedAt) {
+            if (Number(entry.id) > terminalClearedAt) {
                 addLog(entry);
             }
         }
@@ -259,6 +290,7 @@ async function fetchLogs() {
 
     } catch (error) {
         elements.connection.textContent = "RECONNECTING";
+        console.error("Terminal:", error);
     }
 }
 
@@ -268,42 +300,40 @@ function redrawTerminal() {
     const filter = elements.filter.value;
 
     const filtered = displayedLogs.filter(entry =>
-        filter === "ALL" || entry.level === filter
+        filter === "ALL" ||
+        String(entry.level).toUpperCase() === filter
     );
 
     for (const entry of filtered) {
-        const line = document.createElement("div");
-
-        line.className =
-            `terminal-line ${entry.level.toLowerCase()}`;
-
-        line.textContent =
-            `[${new Date(entry.time).toLocaleTimeString()}] ` +
-            `[${entry.level}] ${entry.message}`;
-
-        elements.terminal.appendChild(line);
+        renderLog(entry);
     }
 
     if (elements.autoScroll.checked) {
         elements.terminal.scrollTop =
             elements.terminal.scrollHeight;
     }
+
+    updateLogCount();
 }
+
+// ENGINE CONTROLS
 
 async function controlAction(action) {
     try {
         if (!controlToken) {
-            throw new Error("Enter and unlock your control token first.");
+            throw new Error(
+                "Enter and unlock your control token first."
+            );
         }
 
         const result = await apiRequest(
             API[action],
-            {method: "POST"}
+            { method: "POST" }
         );
 
         addLog({
             id: -Date.now(),
-            time: new Date().toISOString(),
+            created_at: new Date().toISOString(),
             level: "INFO",
             message: `Dashboard command accepted: ${action.toUpperCase()}`
         });
@@ -317,6 +347,8 @@ async function controlAction(action) {
     }
 }
 
+// EVENT LISTENERS
+
 elements.saveToken.addEventListener("click", () => {
     const value = elements.token.value.trim();
 
@@ -326,6 +358,7 @@ elements.saveToken.addEventListener("click", () => {
     }
 
     controlToken = value;
+
     sessionStorage.setItem("docreaper_token", value);
 
     elements.token.value = "";
@@ -356,11 +389,15 @@ elements.filter.addEventListener("change", redrawTerminal);
 elements.clearTerminal.addEventListener("click", () => {
     terminalClearedAt = lastLogId;
     displayedLogs = [];
+
     elements.terminal.innerHTML = "";
-    elements.logCount.textContent = "0 EVENTS";
+
+    updateLogCount();
 });
 
 elements.refresh.addEventListener("click", refreshDashboard);
+
+// INITIALIZATION
 
 async function initialize() {
     await refreshDashboard();
