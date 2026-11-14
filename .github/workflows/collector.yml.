@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   collect:
-    name: Run DocReaper Engine
+    name: Discover, validate and store academic books
     runs-on: ubuntu-latest
     timeout-minutes: 55
 
@@ -27,10 +27,12 @@ jobs:
       DOCREAPER_GOOGLE_DRIVE_REFRESH_TOKEN: ${{ secrets.DOCREAPER_GOOGLE_DRIVE_REFRESH_TOKEN }}
       DOCREAPER_GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.DOCREAPER_GOOGLE_DRIVE_FOLDER_ID }}
       DOCREAPER_TARGET_UNIQUE_BOOKS: "270"
-      PYTHONUNBUFFERED: "1"
+      DOCREAPER_MAX_DOWNLOAD_MB: "100"
+      DOCREAPER_DOWNLOAD_DELAY_SECONDS: "1.5"
+      DOCREAPER_REQUEST_TIMEOUT: "60"
 
     steps:
-      - name: Checkout repository
+      - name: Check out repository
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -39,10 +41,11 @@ jobs:
           python-version: "3.11"
           cache: pip
 
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
       - name: Install DocReaper
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e .
+        run: python -m pip install -e .
 
       - name: Validate configuration
         run: |
@@ -58,8 +61,8 @@ jobs:
               raise SystemExit(
                   "Missing GitHub Actions secrets: " + ", ".join(missing)
               )
-          print("Required configuration variables are present.")
+          print("Required database and Google Drive settings are present.")
           PY
 
-      - name: Run collector
+      - name: Run DocReaper collector
         run: python worker.py
