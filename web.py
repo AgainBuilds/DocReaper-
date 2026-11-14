@@ -1,55 +1,33 @@
 
-"""DocReaper dashboard, pipeline control and Google OAuth."""
+"""DocReaper dashboard: persistent Supabase status, logs and controls."""
+
 from __future__ import annotations
 
-import asyncio
 import html
-import logging
 import secrets
-
-from collections import deque
-from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
-
-from fastapi import (
-    FastAPI,
-    Header,
-    HTTPException,
-    Query,
-    Request,
-)
-
-from fastapi.responses import (
-    FileResponse,
-    HTMLResponse,
-    RedirectResponse,
-)
-
+from fastapi import FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from docreaper.config import settings
-
 from docreaper.google_drive import (
     authorization_url,
     create_state,
     exchange_code,
     verify_state,
 )
-
-from docreaper.pipeline import Pipeline
 from docreaper.storage import Store
 
 
 BASE_DIR = Path(__file__).resolve().parent
 
-
 app = FastAPI(
     title="DocReaper Control Center",
-    version="2.3.0",
+    version="3.0.0",
 )
-
 
 app.mount(
     "/assets",
@@ -59,88 +37,20 @@ app.mount(
 
 
 # ---------------------------------------------------------
-# GLOBAL STATE
+# DATABASE HELPERS
 # ---------------------------------------------------------
 
-LOG_LIMIT = 1500
-
-logs = deque(maxlen=LOG_LIMIT)
-
-log_id = 0
-
-worker = None
-
-pause_event = asyncio.Event()
-pause_event.set()
-
-stop_event = asyncio.Event()
+def get_store() -> Store:
+    return Store(settings.database_url)
 
 
-control = {
-    "status": "idle",
-    "started_at": None,
-    "finished_at": None,
-    "summary": None,
-}
-
-
-# ---------------------------------------------------------
-# LOGGING
-# ---------------------------------------------------------
-
-class LiveLogHandler(logging.Handler):
-
-    def emit(self, record):
-        global log_id
-
-        try:
-            log_id += 1
-
-            logs.append({
-                "id": log_id,
-                "time": datetime.fromtimestamp(
-                    record.created,
-                    timezone.utc,
-                ).astimezone().isoformat(timespec="seconds"),
-                "level": record.levelname,
-                "message": self.format(record),
-            })
-
-        except Exception:
-            self.handleError(record)
-
-
-engine_logger = logging.getLogger("docreaper")
-
-engine_logger.setLevel(logging.INFO)
-
-if not any(
-    isinstance(handler, LiveLogHandler)
-    for handler in engine_logger.handlers
-):
-    live_handler = LiveLogHandler()
-
-    live_handler.setFormatter(
-        logging.Formatter("%(message)s")
-    )
-
-    engine_logger.addHandler(live_handler)
-
-
-# ---------------------------------------------------------
-# HELPERS
-# ---------------------------------------------------------
-
-def require_token(token: str):
+def require_token(token: str) -> None:
     configured = settings.control_token.strip()
 
     if not configured:
         raise HTTPException(
             status_code=503,
-            detail=(
-                "Set DOCREAPER_CONTROL_TOKEN "
-                "in the Render environment."
-            ),
+            detail="Set DOCREAPER_CONTROL_TOKEN in Render environment.",
         )
 
     if not secrets.compare_digest(token, configured):
@@ -150,19 +60,7 @@ def require_token(token: str):
         )
 
 
-def get_stats():
-
-    store = Store(settings.database_url)
-
-    try:
-        return store.stats()
-
-    finally:
-        store.close()
-
-
-def oauth_configuration_ready():
-
+def oauth_configuration_ready() -> bool:
     return all([
         settings.google_client_id,
         settings.google_redirect_uri,
@@ -171,24 +69,32 @@ def oauth_configuration_ready():
 
 
 # ---------------------------------------------------------
-# DASHBOARD
+# DASHBOARD AND HEALTH
 # ---------------------------------------------------------
 
 @app.get("/", include_in_schema=False)
 def dashboard():
-
-    return FileResponse(
-        BASE_DIR / "index.html"
-    )
+    return FileResponse(BASE_DIR / "index.html")
 
 
 @app.get("/health")
 def health():
+    store = get_store()
 
-    return {
-        "status": "ok",
-        "service": "docreaper-dashboard",
-    }
+    try:
+        stats = store.stats()
+        state = store.get_worker_state()
+
+        return {
+            "status": "ok",
+            "service": "docreaper-dashboard",
+            "database": "connected",
+            "worker_status": state.get("status", "idle"),
+            "books": stats["books"],
+        }
+
+    finally:
+        store.close()
 
 
 # ---------------------------------------------------------
@@ -197,19 +103,15 @@ def health():
 
 @app.get("/auth/google", include_in_schema=False)
 async def google_auth():
-
     if not oauth_configuration_ready():
-
         raise HTTPException(
             status_code=503,
             detail="Google OAuth environment variables are incomplete.",
         )
 
-    state = create_state(
-        settings.google_oauth_state_secret
-    )
+    state = create_state(settings.google_oauth_state_secret)
 
-    redirect = RedirectResponse(
+    response = RedirectResponse(
         authorization_url(
             settings.google_client_id,
             settings.google_redirect_uri,
@@ -218,7 +120,7 @@ async def google_auth():
         status_code=302,
     )
 
-    redirect.set_cookie(
+    response.set_cookie(
         key="docreaper_oauth_state",
         value=state,
         httponly=True,
@@ -227,7 +129,7 @@ async def google_auth():
         max_age=600,
     )
 
-    return redirect
+    return response
 
 
 @app.get("/auth/google/callback", include_in_schema=False)
@@ -237,37 +139,30 @@ async def google_callback(
     state: str = "",
     error: str = "",
 ):
-
     if error:
-
         raise HTTPException(
             status_code=400,
             detail="Google authorization was not completed.",
         )
 
     if not code or not state:
-
         raise HTTPException(
             status_code=400,
             detail="Missing authorization code or state.",
         )
 
     if not oauth_configuration_ready():
-
         raise HTTPException(
             status_code=503,
             detail="Google OAuth configuration is incomplete.",
         )
 
-    cookie_state = request.cookies.get(
-        "docreaper_oauth_state"
-    )
+    cookie_state = request.cookies.get("docreaper_oauth_state")
 
     if not cookie_state or not secrets.compare_digest(
         cookie_state,
         state,
     ):
-
         raise HTTPException(
             status_code=400,
             detail="OAuth browser session mismatch. Start again.",
@@ -277,14 +172,12 @@ async def google_callback(
         state,
         settings.google_oauth_state_secret,
     ):
-
         raise HTTPException(
             status_code=400,
             detail="OAuth state is invalid or expired.",
         )
 
     try:
-
         tokens = await exchange_code(
             code=code,
             client_id=settings.google_client_id,
@@ -293,29 +186,19 @@ async def google_callback(
         )
 
     except httpx.HTTPStatusError:
-
-        engine_logger.exception(
-            "GOOGLE OAUTH | Token exchange failed"
-        )
-
         raise HTTPException(
             status_code=502,
-            detail=(
-                "Google token exchange failed. "
-                "Check the Render logs."
-            ),
+            detail="Google token exchange failed. Check Render logs.",
         )
 
     refresh_token = tokens.get("refresh_token")
 
     if not refresh_token:
-
         raise HTTPException(
             status_code=400,
             detail=(
                 "Google did not return a refresh token. "
-                "Check the OAuth consent configuration "
-                "and authorize DocReaper again."
+                "Check OAuth consent configuration and authorize again."
             ),
         )
 
@@ -326,9 +209,7 @@ async def google_callback(
     <html>
     <head>
       <meta name="viewport" content="width=device-width, initial-scale=1">
-
       <title>DocReaper Drive Connected</title>
-
       <style>
         body {{
           font-family: Arial, sans-serif;
@@ -339,13 +220,11 @@ async def google_callback(
           background: #f7f8fa;
           color: #172033;
         }}
-
         .panel {{
           background: white;
           padding: 24px;
           border-radius: 12px;
         }}
-
         textarea {{
           width: 100%;
           min-height: 110px;
@@ -353,7 +232,6 @@ async def google_callback(
           padding: 12px;
           overflow-wrap: anywhere;
         }}
-
         button {{
           padding: 12px 18px;
           margin-top: 12px;
@@ -361,96 +239,97 @@ async def google_callback(
         }}
       </style>
     </head>
-
     <body>
       <div class="panel">
-
         <h2>Google authorization successful</h2>
-
-        <p>
-          Copy this refresh token into your Render environment variable:
-        </p>
-
+        <p>Copy this refresh token into your Render environment:</p>
         <strong>DOCREAPER_GOOGLE_DRIVE_REFRESH_TOKEN</strong>
-
         <textarea id="token" readonly>{safe_token}</textarea>
-
         <button onclick="
           navigator.clipboard.writeText(
             document.getElementById('token').value
           )
-        ">
-          Copy refresh token
-        </button>
-
-        <p>
-          Keep this token private.
-          Never commit it to GitHub.
-        </p>
-
-        <p>
-          After adding it to Render, redeploy DocReaper.
-        </p>
-
+        ">Copy refresh token</button>
+        <p>Keep this token private. Never commit it to GitHub.</p>
+        <p>After adding it to Render, redeploy DocReaper.</p>
       </div>
     </body>
     </html>
     """
 
     response = HTMLResponse(page)
-
-    response.delete_cookie(
-        "docreaper_oauth_state"
-    )
-
+    response.delete_cookie("docreaper_oauth_state")
     return response
 
 
 # ---------------------------------------------------------
-# STATISTICS AND CATALOGUE
+# OVERVIEW AND CATALOGUE
 # ---------------------------------------------------------
 
 @app.get("/api/overview")
 def overview():
+    store = get_store()
 
-    stats = get_stats()
+    try:
+        stats = store.stats()
+        target = settings.target_unique_books
+        total = stats["books"]
 
-    target = settings.target_unique_books
+        return {
+            "target": target,
+            "books": total,
+            "progress_percent": (
+                round(min(total / target * 100, 100), 1)
+                if target else 0
+            ),
+            "pending": stats["discovery_pending"],
+            "kept": stats["discovery_kept"],
+            "duplicates": stats["discovery_duplicate"],
+            "failed": stats["discovery_failed"],
+            "skipped": stats["discovery_skipped"],
+            "by_subject": stats["by_subject"],
+        }
 
-    total = stats["books"]
-
-    return {
-        "target": target,
-        "books": total,
-
-        "progress_percent": (
-            round(min(total / target * 100, 100), 1)
-            if target else 0
-        ),
-
-        "pending": stats["discovery_pending"],
-        "kept": stats["discovery_kept"],
-        "duplicates": stats["discovery_duplicate"],
-        "failed": stats["discovery_failed"],
-        "by_subject": stats["by_subject"],
-    }
+    finally:
+        store.close()
 
 
 @app.get("/api/books")
 def books(
-    limit: int = Query(
-        default=10,
-        ge=1,
-        le=50,
-    )
+    limit: int = Query(default=10, ge=1, le=50),
 ):
-
-    store = Store(settings.database_url)
+    store = get_store()
 
     try:
+        return {"books": store.recent_books(limit)}
+    finally:
+        store.close()
+
+
+# ---------------------------------------------------------
+# PERSISTENT WORKER STATUS
+# ---------------------------------------------------------
+
+@app.get("/api/control/status")
+def control_status():
+    store = get_store()
+
+    try:
+        state = store.get_worker_state()
+        stats = store.stats()
 
         return {
-            "books": store.recent_books(limit)
+            "status": state.get("status", "idle"),
+            "started_at": state.get("last_started_at"),
+            "finished_at": state.get("last_finished_at"),
+            "heartbeat_at": state.get("heartbeat_at"),
+            "last_error": state.get("last_error", ""),
+            "summary": state.get("summary", {}),
+            "pause_requested": state.get("pause_requested", False),
+            "stop_requested": state.get("stop_requested", False),
+            "books": stats["books"],
+            "pending": stats["discovery_pending"],
+            "target": settings.target_unique_books,
         }
 
     finally:
@@ -458,24 +337,7 @@ def books(
 
 
 # ---------------------------------------------------------
-# PIPELINE STATUS
-# ---------------------------------------------------------
-
-@app.get("/api/control/status")
-def control_status():
-
-    stats = get_stats()
-
-    return {
-        **control,
-        "books": stats["books"],
-        "pending": stats["discovery_pending"],
-        "target": settings.target_unique_books,
-    }
-
-
-# ---------------------------------------------------------
-# LIVE LOGS
+# PERSISTENT ENGINE LOGS
 # ---------------------------------------------------------
 
 @app.get("/api/logs")
@@ -483,241 +345,141 @@ def get_logs(
     after: int = Query(default=0, ge=0),
     limit: int = Query(default=250, ge=1, le=500),
 ):
-
-    entries = [
-        item for item in logs
-        if item["id"] > after
-    ]
-
-    return {
-        "logs": entries[-limit:],
-        "latest_id": log_id,
-    }
-
-
-# ---------------------------------------------------------
-# COLLECTION WORKER
-# ---------------------------------------------------------
-
-async def collection_worker():
-
-    store = None
-    client = None
+    store = get_store()
 
     try:
-
-        engine_logger.info(
-            "WORKER | Initializing collection engine"
+        entries = store.recent_logs(
+            after=after,
+            limit=limit,
         )
 
-        store = Store(settings.database_url)
+        latest_id = entries[-1]["id"] if entries else after
 
-        client = httpx.AsyncClient(
-            follow_redirects=True,
-            headers={
-                "User-Agent": settings.user_agent
-            },
-        )
-
-        pipeline = Pipeline(
-            store,
-            client=client,
-            pause_event=pause_event,
-            stop_event=stop_event,
-        )
-
-        engine_logger.info(
-            "TARGET | %d unique books",
-            settings.target_unique_books,
-        )
-
-        summary = await pipeline.run()
-
-        control["summary"] = summary
-
-        if stop_event.is_set():
-
-            control["status"] = "stopped"
-
-            engine_logger.warning(
-                "WORKER | Safely stopped"
-            )
-
-        else:
-
-            control["status"] = "completed"
-
-            engine_logger.info(
-                "WORKER | Collection completed"
-            )
-
-        engine_logger.info(
-            "SUMMARY | %s",
-            summary,
-        )
-
-    except Exception:
-
-        control["status"] = "failed"
-
-        engine_logger.exception(
-            "WORKER | Fatal failure"
-        )
+        return {
+            "logs": entries,
+            "latest_id": latest_id,
+        }
 
     finally:
-
-        if client:
-            await client.aclose()
-
-        if store:
-            store.close()
-
-        control["finished_at"] = datetime.now(
-            timezone.utc
-        ).isoformat()
+        store.close()
 
 
 # ---------------------------------------------------------
-# START COLLECTION
+# COLLECTION CONTROLS
 # ---------------------------------------------------------
 
 @app.post("/api/control/start")
 async def start_collection(
     x_control_token: str = Header(default=""),
 ):
-
-    global worker
-
     require_token(x_control_token)
 
-    if worker and not worker.done():
-
-        raise HTTPException(
-            status_code=409,
-            detail="Collection is already active.",
-        )
-
-    pause_event.set()
-
-    stop_event.clear()
-
-    control.update({
-        "status": "running",
-
-        "started_at": datetime.now(
-            timezone.utc
-        ).isoformat(),
-
-        "finished_at": None,
-        "summary": None,
-    })
-
-    engine_logger.info(
-        "CONTROL | START command received"
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            "The collector runs through GitHub Actions. "
+            "Open GitHub → Actions → DocReaper Collector → Run workflow. "
+            "Dashboard-triggered runs will be added after GitHub "
+            "workflow authentication is configured."
+        ),
     )
 
-    worker = asyncio.create_task(
-        collection_worker()
-    )
-
-    return {
-        "status": "running"
-    }
-
-
-# ---------------------------------------------------------
-# PAUSE COLLECTION
-# ---------------------------------------------------------
 
 @app.post("/api/control/pause")
 async def pause_collection(
     x_control_token: str = Header(default=""),
 ):
-
     require_token(x_control_token)
 
-    if control["status"] != "running":
+    store = get_store()
 
-        raise HTTPException(
-            status_code=409,
-            detail="Engine is not running.",
+    try:
+        state = store.get_worker_state()
+
+        if state.get("status") != "running":
+            raise HTTPException(
+                status_code=409,
+                detail="No running collector is currently registered.",
+            )
+
+        store.update_worker_state(
+            pause_requested=True,
+            status="paused",
         )
 
-    pause_event.clear()
+        store.add_log(
+            "CONTROL | Pause requested from dashboard",
+            level="WARNING",
+        )
 
-    control["status"] = "paused"
+        return {"status": "paused"}
 
-    engine_logger.warning(
-        "CONTROL | PAUSE requested"
-    )
+    finally:
+        store.close()
 
-    return {
-        "status": "paused"
-    }
-
-
-# ---------------------------------------------------------
-# RESUME COLLECTION
-# ---------------------------------------------------------
 
 @app.post("/api/control/resume")
 async def resume_collection(
     x_control_token: str = Header(default=""),
 ):
-
     require_token(x_control_token)
 
-    if control["status"] != "paused":
+    store = get_store()
 
-        raise HTTPException(
-            status_code=409,
-            detail="Engine is not paused.",
+    try:
+        state = store.get_worker_state()
+
+        if not state.get("pause_requested"):
+            raise HTTPException(
+                status_code=409,
+                detail="Collector is not paused.",
+            )
+
+        store.update_worker_state(
+            pause_requested=False,
+            status="running",
         )
 
-    pause_event.set()
+        store.add_log(
+            "CONTROL | Resume requested from dashboard",
+            level="INFO",
+        )
 
-    control["status"] = "running"
+        return {"status": "running"}
 
-    engine_logger.info(
-        "CONTROL | RESUME requested"
-    )
+    finally:
+        store.close()
 
-    return {
-        "status": "running"
-    }
-
-
-# ---------------------------------------------------------
-# STOP COLLECTION
-# ---------------------------------------------------------
 
 @app.post("/api/control/stop")
 async def stop_collection(
     x_control_token: str = Header(default=""),
 ):
-
     require_token(x_control_token)
 
-    if control["status"] not in (
-        "running",
-        "paused",
-    ):
+    store = get_store()
 
-        raise HTTPException(
-            status_code=409,
-            detail="No active collection.",
+    try:
+        state = store.get_worker_state()
+
+        if state.get("status") not in ("running", "paused"):
+            raise HTTPException(
+                status_code=409,
+                detail="No active collector is registered.",
+            )
+
+        store.update_worker_state(
+            stop_requested=True,
+            pause_requested=False,
+            status="stopping",
         )
 
-    stop_event.set()
+        store.add_log(
+            "CONTROL | Stop requested from dashboard",
+            level="WARNING",
+        )
 
-    pause_event.set()
+        return {"status": "stopping"}
 
-    control["status"] = "stopping"
-
-    engine_logger.warning(
-        "CONTROL | STOP requested; finishing current operation"
-    )
-
-    return {
-        "status": "stopping"
-    }
+    finally:
+        store.close()
