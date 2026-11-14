@@ -1,5 +1,6 @@
 
 """DocReaper collection and processing engine."""
+
 from __future__ import annotations
 
 import asyncio
@@ -40,22 +41,27 @@ class Pipeline:
     ):
         self.store = store
         self.cloud = cloud or CloudStore()
+
         self.client = client or httpx.AsyncClient(
-            follow_redirects=True
+            follow_redirects=True,
+            headers={"User-Agent": settings.user_agent},
         )
 
         self.target = (
-            target if target is not None
+            target
+            if target is not None
             else settings.target_unique_books
         )
 
         self.threshold = (
-            threshold if threshold is not None
+            threshold
+            if threshold is not None
             else settings.near_duplicate_threshold
         )
 
         self.min_chars = (
-            min_chars if min_chars is not None
+            min_chars
+            if min_chars is not None
             else settings.min_text_chars
         )
 
@@ -64,44 +70,104 @@ class Pipeline:
 
         self.stop_event = stop_event or asyncio.Event()
 
+    # ---------------------------------------------------------
+    # DURABLE WORKER CONTROL
+    # ---------------------------------------------------------
+
     async def checkpoint(self):
+        """
+        Check both local asyncio controls and persistent
+        database controls before processing another candidate.
+        """
+
         if self.stop_event.is_set():
             return False
 
+        try:
+            state = self.store.get_worker_state()
+
+            if state.get("stop_requested"):
+                self.stop_event.set()
+                log.warning(
+                    "CONTROL | Persistent STOP request detected"
+                )
+                return False
+
+            if state.get("pause_requested"):
+                log.warning(
+                    "CONTROL | Persistent PAUSE request detected"
+                )
+
+                while True:
+                    if self.stop_event.is_set():
+                        return False
+
+                    await asyncio.sleep(5)
+
+                    state = self.store.get_worker_state()
+
+                    if state.get("stop_requested"):
+                        self.stop_event.set()
+                        return False
+
+                    if not state.get("pause_requested"):
+                        log.info(
+                            "CONTROL | Persistent RESUME detected"
+                        )
+                        break
+
+        except Exception:
+            log.exception(
+                "CONTROL | Could not read persistent worker state"
+            )
+
         if not self.pause_event.is_set():
             log.warning(
-                "CONTROL | Paused at safe processing checkpoint"
+                "CONTROL | Local pause requested"
             )
 
         await self.pause_event.wait()
 
         return not self.stop_event.is_set()
 
+    # ---------------------------------------------------------
+    # DISCOVERY
+    # ---------------------------------------------------------
+
     async def discover(self, pages=None):
         page_count = (
-            pages if pages is not None
+            pages
+            if pages is not None
             else settings.pages_per_subject
         )
 
-        log.info("DISCOVERY | Beginning internet discovery")
+        log.info(
+            "DISCOVERY | Starting internet discovery"
+        )
 
         records = await discover_all(
             self.client,
             settings.subjects,
-            page_count
+            page_count,
         )
 
-        added = sum(
-            1 for record in records
-            if self.store.add_discovery(record)
-        )
+        added = 0
+
+        for record in records:
+            if self.store.add_discovery(record):
+                added += 1
 
         log.info(
-            "DISCOVERY | %d candidates found | %d new records queued",
-            len(records), added
+            "DISCOVERY | Candidates=%d | Newly queued=%d",
+            len(records),
+            added,
         )
 
         return added
+
+    # ---------------------------------------------------------
+    # DOCUMENT INGESTION
+    # ---------------------------------------------------------
 
     def ingest_bytes(
         self,
@@ -119,55 +185,63 @@ class Pipeline:
         source="",
         license="unknown",
     ):
-        log.info("FINGERPRINT | Analysing %s", title)
+        log.info(
+            "FINGERPRINT | Analysing document: %s",
+            title,
+        )
 
         fp = fingerprint(data, text)
 
         log.info(
             "SHA256 | FILE=%s | TEXT=%s",
             fp.file_sha256,
-            fp.text_sha256
+            fp.text_sha256,
         )
 
         log.info(
             "TEXT ANALYSIS | Words=%d | Shingles=%d",
             fp.word_count,
-            len(fp.shingles)
+            len(fp.shingles),
         )
 
+        # Exact file duplicate.
         if self.store.has_file_sha256(fp.file_sha256):
             log.warning(
                 "DUPLICATE | Identical file detected | %s",
-                title
+                title,
             )
+
             return {
                 "status": "duplicate",
                 "reason": "identical file",
                 "url": url,
             }
 
+        # Exact extracted-text duplicate.
         if self.store.has_text_sha256(fp.text_sha256):
             log.warning(
                 "DUPLICATE | Identical extracted text | %s",
-                title
+                title,
             )
+
             return {
                 "status": "duplicate",
                 "reason": "identical text",
                 "url": url,
             }
 
+        # Mathematical similarity comparison.
         near = self.store.near_duplicate(
             fp.shingles,
             fp.word_count,
-            self.threshold
+            self.threshold,
         )
 
         if near:
             log.warning(
                 "NEAR DUPLICATE | %s | Similarity=%.4f",
                 title,
-                near["score"]
+                near["score"],
             )
 
             return {
@@ -177,19 +251,26 @@ class Pipeline:
                 "url": url,
             }
 
-        log.info("DEDUPLICATION | Passed all checks")
+        log.info(
+            "DEDUPLICATION | Passed exact and similarity checks"
+        )
 
         filename = (
             urlparse(url).path.rsplit("/", 1)[-1]
-            if url else f"{fp.file_sha256[:12]}.{fmt}"
+            if url
+            else f"{fp.file_sha256[:12]}.{fmt}"
         )
+
+        if not filename:
+            filename = f"{fp.file_sha256[:12]}.{fmt}"
 
         log.info(
             "STORAGE | Saving %s | %.2f MB",
             filename,
-            len(data) / (1024 * 1024)
+            len(data) / (1024 * 1024),
         )
 
+        # Cloud storage must complete before catalogue insertion.
         path = self.cloud.save(data, filename)
 
         book = Book(
@@ -202,16 +283,22 @@ class Pipeline:
             fmt=fmt,
             size_bytes=len(data),
             license=license,
-            metadata={"category": category},
+            metadata={
+                "category": category,
+                "source": source,
+            },
         )
 
         book_id = self.store.add_book(
-            book, fp, path
+            book,
+            fp,
+            path,
         )
 
         log.info(
             "CATALOGUE | BOOK #%d SAVED | %s",
-            book_id, title
+            book_id,
+            title,
         )
 
         return {
@@ -220,6 +307,10 @@ class Pipeline:
             "path": path,
             "url": url,
         }
+
+    # ---------------------------------------------------------
+    # PROCESS ONE DISCOVERY RECORD
+    # ---------------------------------------------------------
 
     async def process_one(self, item):
         url = item["url"]
@@ -230,23 +321,25 @@ class Pipeline:
             "PROCESSOR | %s | SOURCE=%s | SUBJECT=%s",
             title,
             source,
-            item.get("subject", "")
+            item.get("subject", ""),
         )
 
-        # Do not bulk-download Open Library scans without
-        # verifying the specific item's redistribution rights.
+        # Do not download Open Library scans unless the
+        # specific item's redistribution rights are verified.
         if source == "openlibrary":
             reason = (
                 "Rights not verified; metadata retained only."
             )
 
             self.store.set_discovery_status(
-                url, "skipped", reason
+                url,
+                "skipped",
+                reason,
             )
 
             log.warning(
-                "RIGHTS CHECK | Skipped download | %s",
-                title
+                "RIGHTS CHECK | Download skipped | %s",
+                title,
             )
 
             return {
@@ -255,35 +348,46 @@ class Pipeline:
                 "reason": reason,
             }
 
+        # Count the attempt before starting network work.
+        self.store.mark_discovery_attempt(url)
+
         try:
             log.info(
-                "DOWNLOAD | Initiating retrieval | %s",
-                url
+                "DOWNLOAD | Starting retrieval | %s",
+                url,
             )
 
             data, content_type, final_url = await download(
                 self.client,
                 url,
                 timeout=settings.request_timeout,
-                max_bytes=settings.max_download_mb * 1024 * 1024,
+                max_bytes=(
+                    settings.max_download_mb * 1024 * 1024
+                ),
                 retries=settings.download_retries,
                 delay=settings.download_delay_seconds,
                 user_agent=settings.user_agent,
             )
 
             log.info(
-                "EXTRACTION | Detecting format | %s",
-                content_type
+                "DOWNLOAD | Received %.2f MB",
+                len(data) / (1024 * 1024),
+            )
+
+            log.info(
+                "EXTRACTION | Detecting document format | %s",
+                content_type,
             )
 
             text, fmt = extraction.extract_bytes(
-                data, content_type
+                data,
+                content_type,
             )
 
             log.info(
                 "EXTRACTION | Format=%s | Characters=%d",
                 fmt.upper(),
-                len(text)
+                len(text),
             )
 
             if len(text.strip()) < self.min_chars:
@@ -304,37 +408,47 @@ class Pipeline:
                 url=final_url,
                 source=source,
                 license=SOURCE_LICENSES.get(
-                    source, "unknown"
+                    source,
+                    "unknown",
                 ),
             )
 
         except Exception as exc:
+            error_message = str(exc)[:1000]
+
             self.store.set_discovery_status(
-                url, "failed", str(exc)[:300]
+                url,
+                "failed",
+                error_message,
             )
 
             log.exception(
                 "PROCESSING FAILURE | %s",
-                title
+                title,
             )
 
             return {
                 "status": "failed",
                 "url": url,
-                "error": str(exc),
+                "error": error_message,
             }
 
         self.store.set_discovery_status(
-            url, result["status"]
+            url,
+            result["status"],
         )
 
         log.info(
             "PROCESSING COMPLETE | %s | STATUS=%s",
             title,
-            result["status"]
+            result["status"],
         )
 
         return result
+
+    # ---------------------------------------------------------
+    # MAIN COLLECTION LOOP
+    # ---------------------------------------------------------
 
     async def run(self, batch_size=50):
         summary = {
@@ -342,12 +456,13 @@ class Pipeline:
             "duplicate": 0,
             "failed": 0,
             "skipped": 0,
+            "processed": 0,
         }
 
         log.info(
             "ENGINE START | Current=%d | Target=%d",
             self.store.count_books(),
-            self.target
+            self.target,
         )
 
         while self.store.count_books() < self.target:
@@ -364,17 +479,19 @@ class Pipeline:
                     "QUEUE EMPTY | Starting discovery cycle"
                 )
 
-                if not await self.discover():
+                added = await self.discover()
+
+                if not added:
                     log.warning(
-                        "NO NEW RECORDS | Ending collection run"
+                        "NO NEW RECORDS | No fresh candidates found"
                     )
                     break
 
                 continue
 
             log.info(
-                "QUEUE | %d pending records loaded",
-                len(queue)
+                "QUEUE | Loaded %d candidates",
+                len(queue),
             )
 
             for item in queue:
@@ -387,7 +504,19 @@ class Pipeline:
 
                 result = await self.process_one(item)
 
-                summary[result["status"]] += 1
+                status = result["status"]
+
+                if status in summary:
+                    summary[status] += 1
+
+                summary["processed"] += 1
+
+                log.info(
+                    "PROGRESS | Books=%d/%d | Processed=%d",
+                    self.store.count_books(),
+                    self.target,
+                    summary["processed"],
+                )
 
                 await asyncio.sleep(
                     settings.download_delay_seconds
@@ -398,9 +527,15 @@ class Pipeline:
 
         summary["total_books"] = self.store.count_books()
 
+        if summary["total_books"] >= self.target:
+            log.info(
+                "TARGET REACHED | %d unique books",
+                summary["total_books"],
+            )
+
         log.info(
             "ENGINE FINISHED | %s",
-            summary
+            summary,
         )
 
         return summary
