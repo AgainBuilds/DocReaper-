@@ -1,9 +1,37 @@
 
 services:
   - type: web
-    name: docreaper-dashboard
+    name: docreaper
     runtime: python
     plan: free
+
     buildCommand: pip install -e . && pip install -r requirements-web.txt
+
     startCommand: uvicorn web:app --host 0.0.0.0 --port $PORT
+
     healthCheckPath: /health
+
+    envVars:
+      - key: DOCREAPER_DATABASE_URL
+        sync: false
+
+      - key: DOCREAPER_CONTROL_TOKEN
+        sync: false
+
+      - key: DOCREAPER_GOOGLE_CLIENT_ID
+        sync: false
+
+      - key: DOCREAPER_GOOGLE_CLIENT_SECRET
+        sync: false
+
+      - key: DOCREAPER_GOOGLE_REDIRECT_URI
+        value: https://docreaper.onrender.com/auth/google/callback
+
+      - key: DOCREAPER_GOOGLE_OAUTH_STATE_SECRET
+        sync: false
+
+      - key: DOCREAPER_GOOGLE_DRIVE_REFRESH_TOKEN
+        sync: false
+
+      - key: DOCREAPER_GOOGLE_DRIVE_FOLDER_ID
+        sync: false
