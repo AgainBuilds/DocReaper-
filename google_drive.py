@@ -1,10 +1,9 @@
 
-"""Google Drive OAuth and upload helpers.
-
-Uses the Drive API directly through httpx; no Google SDK required.
-"""
+"""Google Drive OAuth and upload helpers."""
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import mimetypes
 import secrets
@@ -33,13 +32,9 @@ def authorization_url(client_id: str, redirect_uri: str, state: str) -> str:
 
 
 def create_state(secret: str) -> str:
-    """Create a short-lived, signed OAuth state value."""
     timestamp = str(int(time.time()))
     nonce = secrets.token_urlsafe(24)
     payload = f"{timestamp}.{nonce}"
-
-    import hashlib
-    import hmac
 
     signature = hmac.new(
         secret.encode(),
@@ -51,10 +46,6 @@ def create_state(secret: str) -> str:
 
 
 def verify_state(state: str, secret: str, max_age: int = 600) -> bool:
-    """Validate OAuth state and reject expired values."""
-    import hashlib
-    import hmac
-
     try:
         timestamp, nonce, signature = state.split(".", 2)
         payload = f"{timestamp}.{nonce}"
@@ -78,22 +69,23 @@ async def exchange_code(
     *,
     code: str,
     client_id: str,
-    client_secret: str,
+    client_secret: str = "",
     redirect_uri: str,
 ) -> dict:
-    """Exchange an OAuth authorization code for Google tokens."""
-    async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(
-            TOKEN_URL,
-            data={
-                "code": code,
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "redirect_uri": redirect_uri,
-                "grant_type": "authorization_code",
-            },
-        )
+    """Exchange an authorization code for Google tokens."""
+    data = {
+        "code": code,
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "grant_type": "authorization_code",
+    }
 
+    # Google currently permits this field to be omitted.
+    if client_secret.strip():
+        data["client_secret"] = client_secret.strip()
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.post(TOKEN_URL, data=data)
         response.raise_for_status()
         return response.json()
 
@@ -103,20 +95,24 @@ def upload_bytes(
     filename: str,
     *,
     client_id: str,
-    client_secret: str,
     refresh_token: str,
+    client_secret: str = "",
     folder_id: str = "",
 ) -> dict:
-    """Refresh the access token and upload one file to Drive."""
+    """Refresh the access token and upload a file to Google Drive."""
+    token_data = {
+        "client_id": client_id,
+        "refresh_token": refresh_token,
+        "grant_type": "refresh_token",
+    }
+
+    if client_secret.strip():
+        token_data["client_secret"] = client_secret.strip()
+
     with httpx.Client(timeout=120) as client:
         token_response = client.post(
             TOKEN_URL,
-            data={
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "refresh_token": refresh_token,
-                "grant_type": "refresh_token",
-            },
+            data=token_data,
         )
         token_response.raise_for_status()
 
@@ -156,4 +152,5 @@ def upload_bytes(
             "webViewLink",
             f"https://drive.google.com/file/d/{result['id']}/view",
         )
+
         return result
