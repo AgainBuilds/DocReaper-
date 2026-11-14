@@ -225,8 +225,20 @@ class Store:
                 row_factory=dict_row,
                 connect_timeout=20,
             )
-            self.conn.execute(POSTGRES_SCHEMA)
-            self.conn.commit()
+
+            try:
+                for statement in POSTGRES_SCHEMA.split(";"):
+                    statement = statement.strip()
+
+                    if statement:
+                        self.conn.execute(statement)
+
+                self.conn.commit()
+
+            except Exception:
+                self.conn.rollback()
+                self.conn.close()
+                raise
 
         else:
             self.conn = sqlite3.connect(
