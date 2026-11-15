@@ -1,5 +1,5 @@
 
-"""Internet discovery through Gutendex and verified open Internet Archive files."""
+"""Sequential discovery through Gutendex and verified Internet Archive files."""
 from __future__ import annotations
 
 import asyncio
@@ -16,13 +16,13 @@ GUTENDEX_URL = "https://gutendex.com/books"
 OPENLIBRARY_URL = "https://openlibrary.org/search.json"
 ARCHIVE_METADATA_URL = "https://archive.org/metadata"
 
+# Only accept actual book formats. Do not treat HTML landing pages
+# or arbitrary plain-text responses as downloadable book files.
 GUTENDEX_FORMATS = (
     "application/pdf",
     "application/epub+zip",
-    "text/plain; charset=utf-8",
-    "text/plain",
-    "text/html",
 )
+
 
 OPEN_LICENSE_MARKERS = (
     "creativecommons.org/publicdomain/mark/1.0",
@@ -38,13 +38,15 @@ OPEN_LICENSE_MARKERS = (
 
 def _gutendex_download(formats):
     for mime in GUTENDEX_FORMATS:
-        if mime in formats:
-            return formats[mime]
+        url = formats.get(mime)
+        if url:
+            return url
     return None
 
 
 def _is_explicitly_open(metadata):
     value = metadata.get("licenseurl") or metadata.get("rights") or ""
+
     if isinstance(value, list):
         value = " ".join(str(part) for part in value)
 
@@ -61,7 +63,7 @@ def _is_true(value):
 
 
 async def _archive_download_details(client, identifier, semaphore):
-    """Resolve a real public file and verify its stated license."""
+    """Resolve a public PDF/EPUB and verify its stated license."""
     url = f"{ARCHIVE_METADATA_URL}/{quote(identifier, safe='')}"
 
     async with semaphore:
@@ -144,12 +146,15 @@ async def _archive_download_details(client, identifier, semaphore):
     return download_url, str(license_name)
 
 
-async def discover_gutendex(client, subject, pages=2):
+async def discover_gutendex(
+    client,
+    subject,
+    pages=2,
+    on_record=None,
+):
     records = []
 
     for page in range(1, pages + 1):
-        params = {"topic": subject, "page": page}
-
         log.info(
             "GUTENDEX SEARCH | subject=%s | page=%d",
             subject,
@@ -159,16 +164,10 @@ async def discover_gutendex(client, subject, pages=2):
         try:
             response = await client.get(
                 GUTENDEX_URL,
-                params=params,
+                params={"topic": subject, "page": page},
             )
             response.raise_for_status()
             data = response.json()
-
-            log.info(
-                "GUTENDEX RESPONSE | HTTP %d | %d results",
-                response.status_code,
-                len(data.get("results", [])),
-            )
 
         except (httpx.HTTPError, ValueError) as exc:
             log.exception("GUTENDEX ERROR | %s", exc)
@@ -206,8 +205,16 @@ async def discover_gutendex(client, subject, pages=2):
                 record.authors,
             )
 
+            # Crucial: process this candidate before discovering
+            # the next one.
+            if on_record is not None:
+                keep_going = await on_record(record)
+                if keep_going is False:
+                    log.info("DISCOVERY | Stopped by collection target")
+                    return records
+
         log.info(
-            "GUTENDEX PAGE COMPLETE | %d downloadable candidates",
+            "GUTENDEX PAGE COMPLETE | %d PDF/EPUB candidates",
             page_count,
         )
 
@@ -224,8 +231,9 @@ async def discover_openlibrary(
     *,
     metadata_cache=None,
     metadata_semaphore=None,
+    on_record=None,
 ):
-    """Discover Open Library records only when IA confirms open files."""
+    """Discover open Internet Archive files one record at a time."""
     records = []
     cache = metadata_cache if metadata_cache is not None else {}
     semaphore = metadata_semaphore or asyncio.Semaphore(6)
@@ -253,21 +261,19 @@ async def discover_openlibrary(
             data = response.json()
             docs = data.get("docs", [])
 
-            log.info(
-                "OPEN LIBRARY RESPONSE | HTTP %d | %d records",
-                response.status_code,
-                len(docs),
-            )
-
         except (httpx.HTTPError, ValueError) as exc:
             log.exception("OPEN LIBRARY ERROR | %s", exc)
             break
 
-        async def resolve(doc):
+        page_count = 0
+
+        # Deliberately sequential. Do not gather an entire page
+        # before allowing the collector to process its first result.
+        for doc in docs:
             identifiers = doc.get("ia") or []
 
             if not identifiers:
-                return None
+                continue
 
             identifier = identifiers[0]
 
@@ -281,11 +287,11 @@ async def discover_openlibrary(
             details = cache[identifier]
 
             if not details:
-                return None
+                continue
 
             download_url, license_name = details
 
-            return DiscoveryRecord(
+            record = DiscoveryRecord(
                 url=download_url,
                 title=doc.get("title", "Untitled"),
                 authors=", ".join(doc.get("author_name", [])[:3]),
@@ -298,28 +304,23 @@ async def discover_openlibrary(
                 ),
             )
 
-        resolved = await asyncio.gather(
-            *(resolve(doc) for doc in docs)
-        )
-
-        page_count = 0
-
-        for record in resolved:
-            if record is None:
-                continue
-
             records.append(record)
             page_count += 1
 
             log.info(
-                "BOOK DISCOVERED | VERIFIED OPEN FILE | %s | %s",
+                "BOOK DISCOVERED | VERIFIED OPEN FILE | %s",
                 record.title,
-                record.authors,
             )
+
+            if on_record is not None:
+                keep_going = await on_record(record)
+                if keep_going is False:
+                    log.info("DISCOVERY | Stopped by collection target")
+                    return records
 
         log.info(
             "OPEN LIBRARY PAGE COMPLETE | "
-            "%d verified downloadable candidates",
+            "%d verified PDF/EPUB candidates",
             page_count,
         )
 
@@ -329,7 +330,13 @@ async def discover_openlibrary(
     return records
 
 
-async def discover_all(client, subjects, pages_per_subject=2):
+async def discover_all(
+    client,
+    subjects,
+    pages_per_subject=2,
+    on_record=None,
+):
+    """Discover and hand off each candidate before continuing."""
     records = []
     metadata_cache = {}
     metadata_semaphore = asyncio.Semaphore(6)
@@ -339,7 +346,26 @@ async def discover_all(client, subjects, pages_per_subject=2):
         len(subjects),
     )
 
+    stopped = False
+
+    async def emit(record):
+        nonlocal stopped
+
+        if on_record is None:
+            return True
+
+        keep_going = await on_record(record)
+
+        if keep_going is False:
+            stopped = True
+            return False
+
+        return True
+
     for index, subject in enumerate(subjects, start=1):
+        if stopped:
+            break
+
         log.info(
             "SUBJECT SCAN | %d/%d | %s",
             index,
@@ -354,19 +380,24 @@ async def discover_all(client, subjects, pages_per_subject=2):
                 pages_per_subject,
                 metadata_cache=metadata_cache,
                 metadata_semaphore=metadata_semaphore,
+                on_record=emit if on_record is not None else None,
             )
         )
+
+        if stopped:
+            break
 
         records.extend(
             await discover_gutendex(
                 client,
                 subject,
                 pages_per_subject,
+                on_record=emit if on_record is not None else None,
             )
         )
 
     log.info(
-        "DISCOVERY FINISHED | %d verified downloadable candidates",
+        "DISCOVERY FINISHED | %d candidates handed off",
         len(records),
     )
 
