@@ -1,6 +1,5 @@
 
-"""DocReaper collection and processing engine."""
-
+"""DocReaper sequential collection and processing engine."""
 from __future__ import annotations
 
 import asyncio
@@ -16,7 +15,6 @@ from .discovery import discover_all
 from .downloader import download
 from .fingerprints import fingerprint
 from .schemas import Book
-from .storage import Store
 
 log = logging.getLogger("docreaper")
 
@@ -44,45 +42,28 @@ class Pipeline:
     ):
         self.store = store
         self.cloud = cloud or CloudStore()
-
         self.client = client or httpx.AsyncClient(
             follow_redirects=True,
             headers={"User-Agent": settings.user_agent},
         )
-
         self.target = (
-            target
-            if target is not None
+            target if target is not None
             else settings.target_unique_books
         )
-
         self.threshold = (
-            threshold
-            if threshold is not None
+            threshold if threshold is not None
             else settings.near_duplicate_threshold
         )
-
         self.min_chars = (
-            min_chars
-            if min_chars is not None
+            min_chars if min_chars is not None
             else settings.min_text_chars
         )
-
         self.pause_event = pause_event or asyncio.Event()
         self.pause_event.set()
-
         self.stop_event = stop_event or asyncio.Event()
 
-    # ---------------------------------------------------------
-    # DURABLE WORKER CONTROL
-    # ---------------------------------------------------------
-
     async def checkpoint(self):
-        """
-        Check both local asyncio controls and persistent
-        database controls before processing another candidate.
-        """
-
+        """Respect persistent and local pause/stop requests."""
         if self.stop_event.is_set():
             return False
 
@@ -91,86 +72,46 @@ class Pipeline:
 
             if state.get("stop_requested"):
                 self.stop_event.set()
-                log.warning(
-                    "CONTROL | Persistent STOP request detected"
-                )
+                log.warning("CONTROL | STOP request detected")
                 return False
 
-            if state.get("pause_requested"):
-                log.warning(
-                    "CONTROL | Persistent PAUSE request detected"
-                )
+            while state.get("pause_requested"):
+                log.warning("CONTROL | Collection paused")
 
-                while True:
-                    if self.stop_event.is_set():
-                        return False
+                if self.stop_event.is_set():
+                    return False
 
-                    await asyncio.sleep(5)
+                await asyncio.sleep(5)
+                state = self.store.get_worker_state()
 
-                    state = self.store.get_worker_state()
+                if state.get("stop_requested"):
+                    self.stop_event.set()
+                    return False
 
-                    if state.get("stop_requested"):
-                        self.stop_event.set()
-                        return False
-
-                    if not state.get("pause_requested"):
-                        log.info(
-                            "CONTROL | Persistent RESUME detected"
-                        )
-                        break
+            if not state.get("pause_requested"):
+                pass
 
         except Exception:
-            log.exception(
-                "CONTROL | Could not read persistent worker state"
-            )
-
-        if not self.pause_event.is_set():
-            log.warning(
-                "CONTROL | Local pause requested"
-            )
+            log.exception("CONTROL | Could not read worker state")
 
         await self.pause_event.wait()
-
         return not self.stop_event.is_set()
 
-    # ---------------------------------------------------------
-    # DISCOVERY
-    # ---------------------------------------------------------
-
-    async def discover(self, pages=None):
+    async def discover(self, pages=None, on_record=None):
+        """Run discovery, optionally handing each candidate to a callback."""
         page_count = (
-            pages
-            if pages is not None
+            pages if pages is not None
             else settings.pages_per_subject
         )
 
-        log.info(
-            "DISCOVERY | Starting internet discovery"
-        )
+        log.info("DISCOVERY | Starting sequential discovery")
 
-        records = await discover_all(
+        return await discover_all(
             self.client,
             settings.subjects,
             page_count,
+            on_record=on_record,
         )
-
-        added = 0
-
-        for record in records:
-            if self.store.add_discovery(record):
-                added += 1
-
-        log.info(
-            "DISCOVERY | Candidates=%d | Newly queued=%d",
-            len(records),
-            added,
-        )
-
-        return added
-
-    # ---------------------------------------------------------
-    # DOCUMENT INGESTION
-    # ---------------------------------------------------------
 
     def ingest_bytes(
         self,
@@ -188,10 +129,8 @@ class Pipeline:
         source="",
         license="unknown",
     ):
-        log.info(
-            "FINGERPRINT | Analysing document: %s",
-            title,
-        )
+        """Fingerprint, deduplicate, upload and catalogue a book."""
+        log.info("FINGERPRINT | Analysing: %s", title)
 
         fp = fingerprint(data, text)
 
@@ -200,40 +139,20 @@ class Pipeline:
             fp.file_sha256,
             fp.text_sha256,
         )
-
         log.info(
             "TEXT ANALYSIS | Words=%d | Shingles=%d",
             fp.word_count,
             len(fp.shingles),
         )
 
-        # Exact file duplicate.
         if self.store.has_file_sha256(fp.file_sha256):
-            log.warning(
-                "DUPLICATE | Identical file detected | %s",
-                title,
-            )
+            log.warning("DUPLICATE | Identical file | %s", title)
+            return {"status": "duplicate", "reason": "identical file"}
 
-            return {
-                "status": "duplicate",
-                "reason": "identical file",
-                "url": url,
-            }
-
-        # Exact extracted-text duplicate.
         if self.store.has_text_sha256(fp.text_sha256):
-            log.warning(
-                "DUPLICATE | Identical extracted text | %s",
-                title,
-            )
+            log.warning("DUPLICATE | Identical text | %s", title)
+            return {"status": "duplicate", "reason": "identical text"}
 
-            return {
-                "status": "duplicate",
-                "reason": "identical text",
-                "url": url,
-            }
-
-        # Mathematical similarity comparison.
         near = self.store.near_duplicate(
             fp.shingles,
             fp.word_count,
@@ -246,34 +165,27 @@ class Pipeline:
                 title,
                 near["score"],
             )
-
             return {
                 "status": "duplicate",
                 "reason": "near_duplicate",
                 "duplicate_of": near,
-                "url": url,
             }
-
-        log.info(
-            "DEDUPLICATION | Passed exact and similarity checks"
-        )
 
         filename = (
             urlparse(url).path.rsplit("/", 1)[-1]
-            if url
-            else f"{fp.file_sha256[:12]}.{fmt}"
+            if url else ""
         )
 
         if not filename:
             filename = f"{fp.file_sha256[:12]}.{fmt}"
 
         log.info(
-            "STORAGE | Saving %s | %.2f MB",
+            "STORAGE | Uploading %s | %.2f MB",
             filename,
             len(data) / (1024 * 1024),
         )
 
-        # Cloud storage must complete before catalogue insertion.
+        # Do not catalogue until cloud upload succeeds.
         path = self.cloud.save(data, filename)
 
         book = Book(
@@ -292,11 +204,7 @@ class Pipeline:
             },
         )
 
-        book_id = self.store.add_book(
-            book,
-            fp,
-            path,
-        )
+        book_id = self.store.add_book(book, fp, path)
 
         log.info(
             "CATALOGUE | BOOK #%d SAVED | %s",
@@ -308,14 +216,10 @@ class Pipeline:
             "status": "kept",
             "book_id": book_id,
             "path": path,
-            "url": url,
         }
 
-    # ---------------------------------------------------------
-    # PROCESS ONE DISCOVERY RECORD
-    # ---------------------------------------------------------
-
     async def process_one(self, item):
+        """Download and process one discovery record."""
         url = item["url"]
         title = item.get("title") or "Untitled"
         source = item.get("source", "")
@@ -327,53 +231,25 @@ class Pipeline:
             item.get("subject", ""),
         )
 
-        # Reject Open Library records whose redistribution
-        # rights have not been verified by discovery.py.
         if source == "openlibrary":
-            reason = (
-                "Unverified Open Library record rejected."
-            )
+            reason = "Unverified Open Library record rejected."
+            self.store.set_discovery_status(url, "skipped", reason)
+            log.warning("RIGHTS CHECK | Rejected | %s", title)
+            return {"status": "skipped", "reason": reason}
 
-            self.store.set_discovery_status(
-                url,
-                "skipped",
-                reason,
-            )
-
-            log.warning(
-                "RIGHTS CHECK | Unverified record skipped | %s",
-                title,
-            )
-
-            return {
-                "status": "skipped",
-                "url": url,
-                "reason": reason,
-            }
-
-        # Verified Open Library records are allowed through.
         if source == "openlibrary_verified":
-            log.info(
-                "RIGHTS CHECK | Verified open file accepted | %s",
-                title,
-            )
+            log.info("RIGHTS CHECK | Verified open file | %s", title)
 
-        # Count the attempt before starting network work.
         self.store.mark_discovery_attempt(url)
 
         try:
-            log.info(
-                "DOWNLOAD | Starting retrieval | %s",
-                url,
-            )
+            log.info("DOWNLOAD | Starting retrieval | %s", url)
 
             data, content_type, final_url = await download(
                 self.client,
                 url,
                 timeout=settings.request_timeout,
-                max_bytes=(
-                    settings.max_download_mb * 1024 * 1024
-                ),
+                max_bytes=settings.max_download_mb * 1024 * 1024,
                 retries=settings.download_retries,
                 delay=settings.download_delay_seconds,
                 user_agent=settings.user_agent,
@@ -385,14 +261,16 @@ class Pipeline:
             )
 
             log.info(
-                "EXTRACTION | Detecting document format | %s",
+                "EXTRACTION | Detecting document | %s",
                 content_type,
             )
 
-            text, fmt = extraction.extract_bytes(
-                data,
-                content_type,
-            )
+            text, fmt = extraction.extract_bytes(data, content_type)
+
+            if fmt not in {"pdf", "epub"}:
+                raise ValueError(
+                    f"Unsupported book format detected: {fmt}"
+                )
 
             log.info(
                 "EXTRACTION | Format=%s | Characters=%d",
@@ -417,30 +295,24 @@ class Pipeline:
                 description=item.get("description", ""),
                 url=final_url,
                 source=source,
-                license=SOURCE_LICENSES.get(
-                    source,
-                    "unknown",
-                ),
+                license=SOURCE_LICENSES.get(source, "unknown"),
             )
 
         except Exception as exc:
-            error_message = str(exc)[:1000]
+            message = str(exc)[:1000]
 
             self.store.set_discovery_status(
                 url,
                 "failed",
-                error_message,
+                message,
             )
 
-            log.exception(
-                "PROCESSING FAILURE | %s",
-                title,
-            )
+            log.exception("PROCESSING FAILURE | %s", title)
 
             return {
                 "status": "failed",
                 "url": url,
-                "error": error_message,
+                "error": message,
             }
 
         self.store.set_discovery_status(
@@ -456,17 +328,15 @@ class Pipeline:
 
         return result
 
-    # ---------------------------------------------------------
-    # MAIN COLLECTION LOOP
-    # ---------------------------------------------------------
-
     async def run(self, batch_size=50):
+        """Process queued books, then discover and process one at a time."""
         summary = {
             "kept": 0,
             "duplicate": 0,
             "failed": 0,
             "skipped": 0,
             "processed": 0,
+            "discovered": 0,
         }
 
         log.info(
@@ -475,64 +345,120 @@ class Pipeline:
             self.target,
         )
 
-        while self.store.count_books() < self.target:
+        async def process_candidate(record):
+            """Persist and process a candidate before discovery continues."""
+            if not await self.checkpoint():
+                return False
 
+            if self.store.count_books() >= self.target:
+                log.info("TARGET REACHED | Stopping discovery")
+                return False
+
+            if not self.store.add_discovery(record):
+                log.info(
+                    "DISCOVERY | Already known, skipping | %s",
+                    record.title,
+                )
+                return True
+
+            summary["discovered"] += 1
+
+            log.info(
+                "QUEUE | Candidate saved | %s",
+                record.title,
+            )
+
+            result = await self.process_one({
+                "url": record.url,
+                "title": record.title,
+                "authors": record.authors,
+                "source": record.source,
+                "subject": record.subject,
+                "category": record.category,
+                "year": record.year,
+                "description": record.description,
+            })
+
+            status = result["status"]
+
+            if status in summary:
+                summary[status] += 1
+
+            summary["processed"] += 1
+
+            log.info(
+                "PROGRESS | Books=%d/%d | Processed=%d",
+                self.store.count_books(),
+                self.target,
+                summary["processed"],
+            )
+
+            await asyncio.sleep(settings.download_delay_seconds)
+
+            return self.store.count_books() < self.target
+
+        while self.store.count_books() < self.target:
             if not await self.checkpoint():
                 break
 
-            queue = self.store.pending_discoveries(
-                batch_size
-            )
+            # Recover previously queued or due-for-retry candidates.
+            queue = self.store.pending_discoveries(batch_size)
 
-            if not queue:
+            if queue:
                 log.info(
-                    "QUEUE EMPTY | Starting discovery cycle"
+                    "QUEUE | Processing %d saved candidates",
+                    len(queue),
                 )
 
-                added = await self.discover()
+                for item in queue:
+                    if not await self.checkpoint():
+                        break
 
-                if not added:
-                    log.warning(
-                        "NO NEW RECORDS | No fresh candidates found"
+                    if self.store.count_books() >= self.target:
+                        break
+
+                    result = await self.process_one(item)
+                    status = result["status"]
+
+                    if status in summary:
+                        summary[status] += 1
+
+                    summary["processed"] += 1
+
+                    log.info(
+                        "PROGRESS | Books=%d/%d | Processed=%d",
+                        self.store.count_books(),
+                        self.target,
+                        summary["processed"],
                     )
+
+                    await asyncio.sleep(
+                        settings.download_delay_seconds
+                    )
+
+                if self.stop_event.is_set():
                     break
 
                 continue
 
             log.info(
-                "QUEUE | Loaded %d candidates",
-                len(queue),
+                "QUEUE EMPTY | Discovering and processing next book"
             )
 
-            for item in queue:
+            before = summary["discovered"]
 
-                if not await self.checkpoint():
-                    break
+            await self.discover(on_record=process_candidate)
 
-                if self.store.count_books() >= self.target:
-                    break
+            if self.store.count_books() >= self.target:
+                break
 
-                result = await self.process_one(item)
-
-                status = result["status"]
-
-                if status in summary:
-                    summary[status] += 1
-
-                summary["processed"] += 1
-
-                log.info(
-                    "PROGRESS | Books=%d/%d | Processed=%d",
-                    self.store.count_books(),
-                    self.target,
-                    summary["processed"],
+            # No new URLs means this discovery cycle did not add
+            # any work. Do not spin forever over the same records.
+            if summary["discovered"] == before:
+                log.warning(
+                    "NO NEW CANDIDATES | Discovery cycle produced "
+                    "no new queue entries"
                 )
-
-                await asyncio.sleep(
-                    settings.download_delay_seconds
-                )
-
-            if self.stop_event.is_set():
                 break
 
         summary["total_books"] = self.store.count_books()
@@ -543,9 +469,6 @@ class Pipeline:
                 summary["total_books"],
             )
 
-        log.info(
-            "ENGINE FINISHED | %s",
-            summary,
-        )
+        log.info("ENGINE FINISHED | %s", summary)
 
         return summary
