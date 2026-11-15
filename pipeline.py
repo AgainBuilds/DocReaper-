@@ -22,7 +22,10 @@ log = logging.getLogger("docreaper")
 
 SOURCE_LICENSES = {
     "gutenberg": "public domain",
-    "openlibrary": "unverified",
+    "openlibrary_verified": (
+        "Internet Archive metadata: verified public-domain "
+        "or Creative Commons license"
+    ),
 }
 
 
@@ -324,11 +327,11 @@ class Pipeline:
             item.get("subject", ""),
         )
 
-        # Do not download Open Library scans unless the
-        # specific item's redistribution rights are verified.
+        # Reject Open Library records whose redistribution
+        # rights have not been verified by discovery.py.
         if source == "openlibrary":
             reason = (
-                "Rights not verified; metadata retained only."
+                "Unverified Open Library record rejected."
             )
 
             self.store.set_discovery_status(
@@ -338,7 +341,7 @@ class Pipeline:
             )
 
             log.warning(
-                "RIGHTS CHECK | Download skipped | %s",
+                "RIGHTS CHECK | Unverified record skipped | %s",
                 title,
             )
 
@@ -347,6 +350,13 @@ class Pipeline:
                 "url": url,
                 "reason": reason,
             }
+
+        # Verified Open Library records are allowed through.
+        if source == "openlibrary_verified":
+            log.info(
+                "RIGHTS CHECK | Verified open file accepted | %s",
+                title,
+            )
 
         # Count the attempt before starting network work.
         self.store.mark_discovery_attempt(url)
